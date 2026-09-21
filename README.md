@@ -12,6 +12,11 @@
 支持方案保存、历史推演记录、规则图升级后的**版本差异比对**，一键**导出 JSON 结果**，
 规则图以 YAML 声明式维护并提供网页可视化。
 
+**规则版本（v1.1 新增）**：同一方案的规则支持**创建版本 → 编辑草稿 → 发布 → 停用**的完整生命周期，
+每版保留全部规则的严重级别依据与创建 / 发布 / 停用 / 变更时间；方案详情可查看当前生效状态并
+按版本比较差异。**发布后判定接口只读取当前生效版本快照，停用后不再参与判定**（回落全局限定规则图）。
+未创建任何版本的方案行为与旧版完全一致。
+
 > ⚠️ 本工具用于教学、方案预检与安全评审辅助，**不能替代**实验室 SOP、MSDS 与专业安全评估。
 
 ---
@@ -73,10 +78,19 @@ uvicorn app.main:app --reload --port 8000
    **⬇ 导出差异 JSON**。仅允许比较同一方案，记录缺失或方案不一致会返回明确的 4xx 错误。
 6. 打开 **示例①「氰化物废液酸化处理（错误做法）」** 点「推演」，可看到第 2 步
    盐酸 + 氰化钾命中规则 `R001`（生成剧毒 HCN），推演立即中止，第 3 步被阻断。
+7. 想体验规则版本：在该方案卡片上点 **📦 规则版本 → ＋ 新建版本草稿**，把 `R001`
+   从"严重"改为"警示"后 **🚩 保存并发布**，再次推演：同方案不再中止，报告标注
+   `plan1-rv1`；「差异」可对比版本与全局规则图，「停用」即恢复全局判定。
 
 ---
 
 ## 三、规则图如何维护
+
+系统有两层规则，均在 **🕸️ 规则图** 页维护：
+
+1. **全局限定规则图**（本节）：YAML + 网页自定义规则，是所有"未发布方案规则版本"
+   的方案以及预检（dry-run）的判定来源；
+2. **方案规则版本**（见下一章）：按方案克隆出来的不可变快照，发布后该方案判定只认它。
 
 规则图 = **类别节点** + **相容性禁忌边**，数据模型刻意保持简单透明：
 
@@ -124,7 +138,75 @@ uvicorn app.main:app --reload --port 8000
 
 ---
 
-## 四、导出的 JSON 结果结构
+## 四、方案规则版本（草稿 / 发布 / 停用）
+
+> 场景：不同方案要依据不同时期或不同评审口径的规则集判定（例如某方案经工程防护评审，
+> 将特定禁忌从"严重"降为"警示"），同时要求规则变更可评审、可追溯、可回退。
+
+每个方案都有一条独立的规则版本链，与全局限定规则图（YAML + 网页自定义规则）并存：
+
+| 状态 | 含义 | 是否参与判定 |
+| --- | --- | --- |
+| `draft` 草稿 | 从当前生效版本（首次为全局限定规则图）克隆，可反复编辑规则集合与严重级别依据 | 否（仅可手动预览） |
+| `published` 生效中 | 发布后的不可变快照；**每个方案至多一个** | **是，判定接口只读取它** |
+| `superseded` 已被替代 | 发布新版本时，原生效版本自动转入此状态 | 否（保留供差异比对与历史追溯） |
+| `deactivated` 已停用 | 当前生效版本被人工停用 | 否（方案回落全局限定规则图） |
+
+### 网页操作
+
+- **🕸️ 规则图** 页顶部「📦 方案规则版本」选择方案，或在 **📋 配液方案** 卡片上点「📦 规则版本」；
+- 「＋ 新建版本草稿」会克隆**当前生效版本**（首次克隆全局启用规则），也可在 API 指定
+  `base_version_id` 从任意历史版本克隆；
+- 草稿编辑器可**逐规则调整严重级别**、增删规则、编辑标题 / 方程式 / 机理 / 参考文献（即严重级别依据），
+  「▶ 预览判定」用草稿跑一次不落盘的推演，「🚩 保存并发布」使其立即成为当前生效版本；
+- 版本列表对每版显示状态、规则数（按严重级别统计）、来源版本、备注以及
+  **创建 / 发布 / 停用时间**（编辑草稿会更新"最近变更时间"）；
+- 「差异」可在**任意两个版本之间**或**版本 ↔ 全局限定规则图**之间按规则 ID 对齐，
+  列出新增 / 删除 / 严重级别变化 / 判定依据变化（含两侧标题、方程式、机理、文献与级别），可导出 JSON；
+- 「停用」仅对当前生效版本可用。停用后推演 / 导出立即恢复使用全局限定规则图；
+  已发布版本不可删除（保留判定历史），草稿可删除，每个方案至多保留一个草稿。
+
+方案详情 `GET /api/plans/{id}` 的 `effective_rule_version` 字段给出当前生效状态：
+
+```json
+{ "id": 5, "version_no": 2, "status": "published", "status_label": "生效中",
+  "rule_count": 18, "published_at": "2026-09-21T10:00:00+00:00",
+  "updated_at": "2026-09-21T10:00:00+00:00" }
+```
+为 `null` 时表示该方案没有生效版本，判定使用全局限定规则图。
+
+### 判定口径（强约束）
+
+1. 方案推演 / 导出等正式判定：只读取该方案唯一 `published` 版本快照；
+2. 草稿、已替代、已停用版本**都不会**被正式判定读取；
+3. 从未发布或停用后：回落全局限定规则图，行为与 v1.0 完全一致；
+4. 快照在创建时固化，此后修改 YAML 重启、在网页停用 / 改级全局规则**不影响**已发布版本；
+5. 历史推演记录保存所用版本 ID（`runs.rule_version_id`），报告内版本标识形如
+   `plan3-rv2`、并带 `rule_scope=plan_version|global`；旧的记录差异比对因此可直接用于
+   评估"换规则版本对同一方案的影响"。
+
+### HTTP API（均挂在现有 `/api/plans` 前缀下，无需改变访问方式）
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/plans/{id}/rule-versions` | 版本列表 + 当前生效版本 ID + 全局版本号 |
+| POST | `/api/plans/{id}/rule-versions` | 创建草稿（克隆生效版本/全局；可带 `base_version_id`、`rules`） |
+| GET/PUT/DELETE | `/api/plans/{id}/rule-versions/{vid}` | 版本详情 / 编辑草稿（规则与备注）/ 删除草稿 |
+| POST | `/api/plans/{id}/rule-versions/{vid}/publish` | 发布：原生效版本自动转为已替代 |
+| POST | `/api/plans/{id}/rule-versions/{vid}/deactivate` | 停用当前生效版本 |
+| GET | `/api/plans/{id}/rule-versions/diff?base=&target=` | 版本差异；`global` = 全局限定规则图，target 缺省 = global |
+
+`POST /api/plans/{id}/simulate?persist=false&rule_version_id={vid}` 可用任意版本（含草稿）预览；
+`persist=true` 的正式判定固定使用当前生效版本，不接受该参数（返回 `422`）。
+
+**4xx 约定**：方案 / 版本不存在或跨方案访问 → `404`；重复草稿、编辑 / 发布 / 停用 / 删除
+状态不允许、规则集合业务校验失败（空集合、编号重复、类别相同）→ `409`；
+枚举值非法（严重级别不在 low/medium/high）由请求模型拦截 → `422`；
+比较同一版本 → `400`；正式判定携带版本参数 → `422`。
+
+---
+
+## 五、导出的 JSON 结果结构
 
 `GET /api/plans/{id}/export`（实时推演）或 `GET /api/runs/{id}/export`（历史记录）：
 
@@ -132,7 +214,9 @@ uvicorn app.main:app --reload --port 8000
 {
   "engine": "labmix-compat-engine",
   "engine_version": "1.0",
-  "rule_revision": "2026.09",
+  "rule_revision": "plan3-rv2",
+  "rule_scope": "plan_version",
+  "rule_version_id": 5,
   "status": "danger",                    // safe | warning | danger
   "halted": true,
   "first_danger": {
@@ -166,9 +250,14 @@ uvicorn app.main:app --reload --port 8000
 }
 ```
 
+> `rule_scope=global` 时 `rule_revision` 为 YAML 版本号（如 `2026.09`）、无 `rule_version_id`；
+> `rule_scope=plan_version` 时 `rule_revision` 为 `plan{方案ID}-rv{版本号}`，
+> `rule_version_id` 为对应版本。报告是自包含快照：版本后续被替代 / 停用 / 删除规则，
+> 历史记录与导出文件仍保留当时的判定依据。
+
 ---
 
-## 五、版本差异视图（规则升级影响评估）
+## 六、版本差异视图（规则升级影响评估）
 
 当规则图升级（修改 `rules.yaml` 重启、网页停用/改级、追加自定义规则）后，对**同一方案**重新推演，
 即可在「🗂️ 推演记录」中比较新旧两条记录。对齐口径为
@@ -225,16 +314,18 @@ uvicorn app.main:app --reload --port 8000
 
 ---
 
-## 六、HTTP API 速览
+## 七、HTTP API 速览
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/reagents?q=` | 试剂列表（可按名称/CAS/分子式搜索） |
 | POST/PUT/DELETE | `/api/reagents[/{id}]` | 试剂增改删（被步骤引用时拒绝删除） |
 | GET/POST | `/api/plans` | 方案列表 / 新建（含步骤） |
-| GET/PUT/DELETE | `/api/plans/{id}` | 方案详情 / 修改 / 删除 |
-| POST | `/api/plans/{id}/simulate?persist=true` | 按当前规则图推演并（可选）保存记录 |
-| POST | `/api/plans/simulate-dry` | 不保存方案，直接预检 |
+| GET/PUT/DELETE | `/api/plans/{id}` | 方案详情（含 `effective_rule_version` 当前生效版本） / 修改 / 删除 |
+| POST | `/api/plans/{id}/simulate?persist=true` | 按当前生效规则版本推演（无版本则全局图）并可选保存记录 |
+| GET/POST/PUT/DELETE | `/api/plans/{id}/rule-versions[/{vid}[/publish\|/deactivate]]` | **规则版本：创建 / 编辑草稿 / 发布 / 停用 / 删除** |
+| GET | `/api/plans/{id}/rule-versions/diff?base=&target=` | **规则版本差异（支持 `global`）** |
+| POST | `/api/plans/simulate-dry` | 不保存方案，直接预检（使用全局图） |
 | GET | `/api/plans/{id}/export` | 实时推演并下载 JSON |
 | GET | `/api/rules[?active_only=true]` | 规则边 + 类别元信息 + 版本号 |
 | POST | `/api/rules` | 追加自定义规则 |
@@ -251,7 +342,7 @@ uvicorn app.main:app --reload --port 8000
 
 ---
 
-## 七、目录结构
+## 八、目录结构
 
 ```
 .
@@ -261,12 +352,13 @@ uvicorn app.main:app --reload --port 8000
 │   ├── database.py         # SQLite 引擎与会话
 │   ├── models.py           # ORM：试剂 / 方案 / 步骤 / 规则 / 推演记录
 │   ├── schemas.py          # Pydantic 请求响应模型
-│   ├── rules_store.py      # 读取并同步 YAML 规则图
+│   ├── rules_store.py      # 读取并同步 YAML 规则图（全局限定规则图）
+│   ├── versioning.py       # 方案规则版本：快照、草稿/发布/停用状态机、版本差异
 │   ├── engine.py           # 相容性逐步推演引擎（核心算法）
-│   ├── deduce.py           # 方案 → 引擎输入 → 报告 → 落盘
+│   ├── deduce.py           # 方案 → 规则版本解析 → 引擎输入 → 报告 → 落盘
 │   ├── diffing.py          # 两条历史记录的版本差异对齐与汇总
 │   ├── seed.py             # 内置试剂与示例方案
-│   └── routers/            # reagents / plans / rules / runs 路由（diff 在 runs 内）
+│   └── routers/            # reagents / plans / rule_versions / rules / runs 路由
 ├── data/
 │   └── rules.yaml          # 声明式规则图（类别 + 规则边）
 ├── web/                    # 原生 HTML/CSS/JS 界面（无构建步骤）
@@ -278,7 +370,7 @@ uvicorn app.main:app --reload --port 8000
 └── requirements.txt
 ```
 
-## 八、配置项
+## 九、配置项
 
 | 环境变量 | 默认 | 说明 |
 | --- | --- | --- |

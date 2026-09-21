@@ -1,7 +1,7 @@
 """ORM 模型。"""
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 
@@ -82,6 +82,41 @@ class Rule(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
+class RuleVersion(Base):
+    """同一方案下的规则版本（规则快照 + 生命周期状态）。
+
+    rules_json 为发布/创建时刻不可变的规则集合快照（含严重级别依据），
+    推演引擎只读取该方案 status=published 的唯一当前生效版本；
+    发布新版本会把旧的 published 版本置为 superseded；停用(deactivated)
+    后不再参与判定（此时回落到全局限定规则图）。
+    """
+
+    __tablename__ = "rule_versions"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "version_no", name="uq_rule_versions_plan_version"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plan_id: Mapped[int] = mapped_column(
+        ForeignKey("plans.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="draft")  # draft/published/superseded/deactivated
+    source_of_version: Mapped[str] = mapped_column(String(32), default="global")  # global/published_version
+    base_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("rule_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    base_revision: Mapped[str] = mapped_column(String(64), default="")  # 创建时全局版本号
+    note: Mapped[str | None] = mapped_column(Text)
+    rules_json: Mapped[str] = mapped_column(Text, default="[]")  # 规则条目快照 JSON
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_utcnow, onupdate=_utcnow
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deactivated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class Run(Base):
     __tablename__ = "runs"
 
@@ -90,7 +125,11 @@ class Run(Base):
         ForeignKey("plans.id", ondelete="SET NULL"), nullable=True
     )
     plan_name: Mapped[str] = mapped_column(String(128), default="")
-    rule_revision: Mapped[str] = mapped_column(String(32), default="")
+    rule_revision: Mapped[str] = mapped_column(String(64), default="")
+    # 推演时实际使用的方案规则版本（None 表示使用全局限定规则图）
+    rule_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("rule_versions.id", ondelete="SET NULL"), nullable=True
+    )
     status: Mapped[str] = mapped_column(String(16), default="safe")  # safe/warning/danger
     report: Mapped[str] = mapped_column(Text)  # 完整推演报告 JSON
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)

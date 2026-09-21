@@ -131,6 +131,24 @@
     <section id="tab-rules" class="tab-panel">
       <div class="card">
         <div class="card-head">
+          <h2>📦 方案规则版本</h2>
+          <span class="item-meta">同一方案的规则支持草稿 / 发布 / 停用，判定只读取当前生效版本</span>
+        </div>
+        <div class="rv-bar">
+          <label class="rv-bar-label">选择方案
+            <select id="rvPlanSelect"></select>
+          </label>
+          <span class="rv-effective" id="rvEffective"></span>
+          <button type="button" class="btn btn-small" id="btnRvManage">🧰 管理版本</button>
+          <button type="button" class="btn btn-small btn-primary" id="btnRvNewDraft">＋ 新建版本草稿</button>
+        </div>
+        <p class="hint">为方案创建规则版本时会克隆<b>当前生效版本</b>（首次则克隆全局限定规则图）作为草稿；
+          草稿可随意调整规则集合与严重级别依据并预览，<b>发布</b>后推演 / 导出等判定接口只读取该版本快照，
+          原生效版本自动转为「已替代」；<b>停用</b>后该版本不再参与判定，方案回落至全局限定规则图。</p>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
           <h2>相容性规则图</h2>
           <div class="legend" id="graphLegend"></div>
         </div>

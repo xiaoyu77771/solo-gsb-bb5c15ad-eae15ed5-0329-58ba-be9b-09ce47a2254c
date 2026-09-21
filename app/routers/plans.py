@@ -1,11 +1,11 @@
 """方案保存、步骤推演与 JSON 导出。"""
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from .. import models
+from .. import models, versioning
 from ..database import get_db
 from ..deduce import _step_categories, build_report, persist_run
 from ..schemas import PlanCreate, PlanOut, PlanUpdate, StepOut
@@ -28,6 +28,7 @@ def _plan_out(db: Session, plan: models.Plan) -> PlanOut:
                 categories=_step_categories(db, s),
             )
         )
+    effective = versioning.get_published_version(db, plan.id)
     return PlanOut(
         id=plan.id,
         name=plan.name,
@@ -35,6 +36,7 @@ def _plan_out(db: Session, plan: models.Plan) -> PlanOut:
         created_at=plan.created_at,
         updated_at=plan.updated_at,
         steps=steps_out,
+        effective_rule_version=versioning.effective_summary(effective),
     )
 
 
@@ -122,31 +124,47 @@ def delete_plan(plan_id: int, db: Session = Depends(get_db)):
 def simulate_plan(
     plan_id: int,
     persist: bool = True,
+    rule_version_id: int | None = Query(
+        default=None,
+        description="预览指定规则版本（含草稿）；仅 persist=false 时允许。"
+                    "正式判定（persist=true）固定读取当前生效版本。",
+    ),
     db: Session = Depends(get_db),
 ):
-    """按当前规则图推演方案；persist=true 时同时保存一条推演记录。"""
+    """按规则版本推演方案。
+
+    - persist=true（默认）：只读取方案当前生效规则版本；没有则回落全局规则图，
+      并保存一条推演记录；
+    - persist=false 且指定 rule_version_id：可用任意版本（含草稿）做发布前预览，
+      不落盘、不改变判定口径。
+    """
     plan = db.get(models.Plan, plan_id)
     if plan is None:
         raise HTTPException(404, "方案不存在")
     if not plan.steps:
         raise HTTPException(422, "方案还没有加液步骤，无法推演")
+    if persist and rule_version_id is not None:
+        raise HTTPException(422, "保存推演记录时不能指定规则版本：正式判定固定使用当前生效版本")
 
-    report = build_report(db, plan)
+    report, resolved_vid = build_report(db, plan, rule_version_id=rule_version_id)
     report["plan_id"] = plan.id
-    run_id = persist_run(db, plan, report, persist=persist)
+    run_id = persist_run(db, plan, report, persist=persist, rule_version_id=resolved_vid)
     report["run_id"] = run_id
     return report
 
 
 @router.post("/simulate-dry")
 def simulate_dry(plan_in: PlanCreate, db: Session = Depends(get_db)):
-    """不保存方案，直接对提交内容做一次推演（用于保存前预检）。"""
+    """不保存方案，直接对提交内容做一次推演（用于保存前预检）。
+
+    预检对象尚未保存、没有方案级规则版本，使用全局限定规则图。
+    """
     if not plan_in.steps:
         raise HTTPException(422, "方案还没有加液步骤，无法推演")
     plan = models.Plan(name=plan_in.name, description=plan_in.description)
     for idx, st in enumerate(plan_in.steps):
         plan.steps.append(_build_step(db, plan_id=0, st=st, index=idx))
-    report = build_report(db, plan)
+    report, _ = build_report(db, plan)
     report["plan_id"] = None
     return report
 
@@ -160,11 +178,11 @@ def _export_headers(filename: str):
 
 @router.get("/{plan_id}/export")
 def export_plan_report(plan_id: int, db: Session = Depends(get_db)):
-    """用当前规则图实时推演并导出 JSON 文件。"""
+    """用当前生效规则版本（无则全局规则图）实时推演并导出 JSON 文件。"""
     plan = db.get(models.Plan, plan_id)
     if plan is None:
         raise HTTPException(404, "方案不存在")
-    report = build_report(db, plan)
+    report, _ = build_report(db, plan)
     report["plan_id"] = plan.id
     payload = json.dumps(report, ensure_ascii=False, indent=2)
     return JSONResponse(

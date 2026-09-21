@@ -96,6 +96,7 @@ class PlanOut(PlanBase):
     created_at: datetime
     updated_at: datetime
     steps: list[StepOut]
+    effective_rule_version: Optional[dict] = None  # 当前生效规则版本摘要（None=使用全局规则图）
 
 
 # ---------- 规则 ----------
@@ -147,3 +148,29 @@ class RunOut(BaseModel):
     status: str
     created_at: datetime
     report: dict
+
+
+# ---------- 方案规则版本 ----------
+
+class VersionRuleIn(BaseModel):
+    id: str = Field(min_length=1, max_length=32)
+    source: str = Field(min_length=1, max_length=64)
+    target: str = Field(min_length=1, max_length=64)
+    directional: bool = False
+    severity: Severity = "medium"
+    title: str = ""
+    reaction: str = ""
+    rationale: str = ""
+    references: list[str] = Field(default_factory=list)
+    builtin: bool = False
+
+
+class RuleVersionCreate(BaseModel):
+    note: Optional[str] = Field(default=None, max_length=2000)
+    base_version_id: Optional[int] = None  # 不传则克隆当前生效版本 / 全局规则图
+    rules: Optional[list[VersionRuleIn]] = None  # 不传则按克隆来源生成草稿
+
+
+class RuleVersionUpdate(BaseModel):
+    note: Optional[str] = Field(default=None, max_length=2000)
+    rules: Optional[list[VersionRuleIn]] = None

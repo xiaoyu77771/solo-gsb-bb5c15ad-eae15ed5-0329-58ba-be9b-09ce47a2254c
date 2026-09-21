@@ -16,6 +16,8 @@ const state = {
   report: null,
   runs: [],
   diff: null,
+  ruleVersions: [],      // 当前选中方案的规则版本列表
+  rvPlanId: null,        // 规则版本模块当前选中的方案 ID
 };
 
 /* ---------------- API ---------------- */
@@ -57,7 +59,10 @@ $$(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
     $$(".tab").forEach((b) => b.classList.toggle("active", b === btn));
     $$(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === `tab-${btn.dataset.tab}`));
-    if (btn.dataset.tab === "rules") setTimeout(renderGraph, 60);
+    if (btn.dataset.tab === "rules") {
+      refreshRvPlanSelect();
+      setTimeout(renderGraph, 60);
+    }
     if (btn.dataset.tab === "runs") loadRuns();
   });
 });
@@ -74,6 +79,7 @@ async function loadReagents() {
 async function loadPlans() {
   state.plans = await api("/api/plans");
   renderPlanList();
+  refreshRvPlanSelect();
 }
 
 async function loadRules() {
@@ -339,8 +345,12 @@ function renderPlanList() {
     .forEach((p) => {
       const li = document.createElement("li");
       li.className = "item";
+      const ev = p.effective_rule_version;
+      const effLine = ev
+        ? `<span class="badge badge-ok">规则 v${ev.version_no} 生效中</span>`
+        : '<span class="badge badge-blocked">全局规则图</span>';
       li.innerHTML = `
-        <div class="item-title">${escapeHtml(p.name)}</div>
+        <div class="item-title">${escapeHtml(p.name)} ${effLine}</div>
         <div class="item-meta"><span>🕐 ${p.steps.length} 步</span><span>更新于 ${fmtTime(p.updated_at)}</span></div>
         ${p.description ? `<div class="item-meta">${escapeHtml(p.description)}</div>` : ""}
       `;
@@ -349,6 +359,7 @@ function renderPlanList() {
       actions.append(
         actionBtn("编辑", "btn-small", () => editPlan(p)),
         actionBtn("⚡ 推演", "btn-small btn-primary", () => simulatePlan(p).catch((e) => toast(e.message, true))),
+        actionBtn("📦 规则版本", "btn-small", () => openPlanVersions(p)),
         actionBtn("导出 JSON", "btn-small", () => exportPlan(p.id)),
         actionBtn("删除", "btn-small btn-danger", () => removePlan(p)),
       );
@@ -382,9 +393,20 @@ function actionBtn(text, cls, fn) {
   return b;
 }
 
+function openPlanVersions(plan) {
+  $$(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === "rules"));
+  $$(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === "tab-rules"));
+  refreshRvPlanSelect(plan.id);
+  state.rvPlanId = plan.id;
+  $("#rvPlanSelect").value = String(plan.id);
+  renderRvEffective();
+  openRvManager();
+}
+
 /* ---------------- 报告渲染 ---------------- */
 
-function renderReport(report, { editable = false, container = $("#reportWrap") } = {}) {
+function renderReport(report, { editable = false, hideExport = false, container = $("#reportWrap") } = {}) {
+  const editable2 = { editable, hideExport };
   window.__lastReport = report;
   const wrap = container;
   wrap.classList.remove("hidden");
@@ -412,7 +434,9 @@ function renderReport(report, { editable = false, container = $("#reportWrap") }
       <div style="flex:1">
         <h2>${title}</h2>
         ${bannerMsg}
-        <p class="item-meta">规则图版本 ${escapeHtml(report.rule_revision)} ·
+        <p class="item-meta">${report.rule_scope === "plan_version"
+          ? `方案规则版本 <b>${escapeHtml(report.rule_revision)}</b>`
+          : `全局限定规则图 ${escapeHtml(report.rule_revision)}`} ·
           共 ${report.summary.total_steps} 步 / 执行 ${report.summary.executed_steps} 步 ·
           命中规则 <span class="badge badge-high">严重 ${report.summary.high}</span>
           <span class="badge badge-medium">警示 ${report.summary.medium}</span>
@@ -420,7 +444,7 @@ function renderReport(report, { editable = false, container = $("#reportWrap") }
         </p>
       </div>
       <div class="form-actions" style="flex-direction:column">
-        ${report.plan_id ? `<button class="btn btn-small" id="btnExportShow">⬇ 导出 JSON</button>` : ""}
+        ${report.plan_id && !editable2.hideExport ? `<button class="btn btn-small" id="btnExportShow">⬇ 导出 JSON</button>` : ""}
       </div>
     </div>
     <div class="report-grid">
@@ -950,7 +974,8 @@ async function loadRuns() {
 }
 
 function runOptionLabel(r) {
-  return `#${r.id} · ${r.plan_name || "（已删除方案）"} · ${statusMeta[r.status]?.[0] || r.status} · 规则 ${r.rule_revision || "-"} · ${fmtTime(r.created_at)}`;
+  const rev = r.rule_version_id ? `方案规则 v#${r.rule_version_id}` : `规则 ${r.rule_revision || "-"}`;
+  return `#${r.id} · ${r.plan_name || "（已删除方案）"} · ${statusMeta[r.status]?.[0] || r.status} · ${rev} · ${fmtTime(r.created_at)}`;
 }
 
 function renderDiffPickers() {
@@ -1048,7 +1073,11 @@ function renderRunList() {
     li.innerHTML = `
       <div class="item-title"><span class="badge badge-${cls}">${label}</span>
         ${escapeHtml(r.plan_name || "（方案已删除）")} <span class="item-meta">#${r.id}</span></div>
-      <div class="item-meta">${fmtTime(r.created_at)} · 规则图版本 ${escapeHtml(r.rule_revision || "-")}</div>
+      <div class="item-meta">${fmtTime(r.created_at)} · ${
+        r.rule_version_id
+          ? `方案规则版本 #${r.rule_version_id}（${escapeHtml(r.rule_revision || "")}）`
+          : `全局限定规则图 ${escapeHtml(r.rule_revision || "-")}`
+      }</div>
     `;
     const actions = document.createElement("div");
     actions.className = "item-actions";
@@ -1312,6 +1341,521 @@ function openDiffFindingModal(e, diff) {
     ${e.changed_fields.length ? `<p class="hint">变化字段：${e.changed_fields.map((f) => basisFieldLabels[f] || f).join("、")}</p>` : ""}
   `);
   $("#modalBox").classList.add("modal-wide");
+}
+
+/* ---------------- 方案规则版本 ---------------- */
+
+const rvStatusMeta = {
+  draft: ["草稿", "medium"],
+  published: ["生效中", "ok"],
+  superseded: ["已替代", "blocked"],
+  deactivated: ["已停用", "blocked"],
+};
+
+const rv = {
+  versions: [],
+  effectiveId: null,
+  globalRevision: "",
+  edit: null,          // 草稿编辑器状态 { id, rules, note }
+  editingRuleId: null, // 正在新增/编辑的规则条目 ID
+  diff: null,
+};
+
+function refreshRvPlanSelect(preferId) {
+  const sel = $("#rvPlanSelect");
+  if (!sel) return;
+  const cur = preferId ?? (sel.value || state.rvPlanId);
+  sel.innerHTML = '<option value="">— 请选择方案 —</option>' +
+    state.plans.map((p) => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join("");
+  if (cur && state.plans.some((p) => String(p.id) === String(cur))) {
+    sel.value = String(cur);
+    state.rvPlanId = Number(cur);
+  } else {
+    state.rvPlanId = null;
+  }
+  renderRvEffective();
+}
+
+function renderRvEffective() {
+  const box = $("#rvEffective");
+  if (!box) return;
+  const plan = state.plans.find((p) => String(p.id) === String(state.rvPlanId));
+  if (!plan) { box.innerHTML = ""; return; }
+  const ev = plan.effective_rule_version;
+  if (ev) {
+    box.innerHTML = `当前生效：<span class="badge badge-ok">v${ev.version_no} · ${escapeHtml(ev.status_label)}</span>
+      <span class="item-meta">${ev.rule_count} 条规则 · 发布于 ${fmtTime(ev.published_at)}</span>`;
+  } else {
+    box.innerHTML = `<span class="badge badge-blocked">未启用方案版本</span>
+      <span class="item-meta">判定使用全局限定规则图 ${escapeHtml(state.revision || "")}</span>`;
+  }
+}
+
+$("#rvPlanSelect")?.addEventListener("change", () => {
+  state.rvPlanId = $("#rvPlanSelect").value ? Number($("#rvPlanSelect").value) : null;
+  rv.versions = [];
+  renderRvEffective();
+});
+
+$("#btnRvManage")?.addEventListener("click", openRvManager);
+$("#btnRvNewDraft")?.addEventListener("click", async () => {
+  if (!state.rvPlanId) { toast("请先选择方案", true); return; }
+  try {
+    const created = await api(`/api/plans/${state.rvPlanId}/rule-versions`, {
+      method: "POST",
+      body: { note: "" },
+    });
+    await loadRvVersions();
+    await loadPlans();
+    openRvDraftEditor(created.id);
+    toast("已基于当前规则创建草稿，编辑后发布");
+  } catch (err) { toast(err.message, true); }
+});
+
+async function loadRvVersions() {
+  if (!state.rvPlanId) { rv.versions = []; return; }
+  const data = await api(`/api/plans/${state.rvPlanId}/rule-versions`);
+  rv.versions = data.versions;
+  rv.effectiveId = data.effective_version_id;
+  rv.globalRevision = data.global_revision;
+  renderRvEffective();
+}
+
+function openRvManager() {
+  if (!state.rvPlanId) { toast("请先选择方案", true); return; }
+  openModal(`
+    <button class="btn btn-ghost modal-close">✕ 关闭</button>
+    <h3>📦 规则版本管理</h3>
+    <div id="rvManagerBody" class="rv-manager-body"></div>
+  `);
+  $("#modalBox").classList.add("modal-wide");
+  loadRvVersions().then(renderRvList).catch((e) => toast(e.message, true));
+}
+
+function renderRvList() {
+  const host = $("#rvManagerBody");
+  if (!host) return;
+  const plan = state.plans.find((p) => String(p.id) === String(state.rvPlanId));
+  const hasDraft = rv.versions.some((v) => v.status === "draft");
+
+  const rows = rv.versions.length
+    ? rv.versions.map((v) => {
+        const [sLabel, sCls] = rvStatusMeta[v.status] || [v.status, "blocked"];
+        const eff = v.is_effective ? '<span class="badge badge-ok">当前生效</span>' : "";
+        const btns = [];
+        btns.push(`<button type="button" class="btn btn-small" data-rv-act="rules" data-id="${v.id}">规则/依据</button>`);
+        btns.push(`<button type="button" class="btn btn-small" data-rv-act="diff" data-id="${v.id}">差异</button>`);
+        if (v.status === "draft") {
+          btns.push(`<button type="button" class="btn btn-small" data-rv-act="edit" data-id="${v.id}">编辑草稿</button>`);
+          btns.push(`<button type="button" class="btn btn-small btn-primary" data-rv-act="publish" data-id="${v.id}">发布</button>`);
+          btns.push(`<button type="button" class="btn btn-small btn-danger" data-rv-act="delete" data-id="${v.id}">删除</button>`);
+        } else if (v.status === "published") {
+          btns.push(`<button type="button" class="btn btn-small" data-rv-act="preview" data-id="${v.id}">预览判定</button>`);
+          btns.push(`<button type="button" class="btn btn-small btn-danger" data-rv-act="deactivate" data-id="${v.id}">停用</button>`);
+        } else if (v.status === "superseded" || v.status === "deactivated") {
+          btns.push(`<button type="button" class="btn btn-small" data-rv-act="preview" data-id="${v.id}">预览判定</button>`);
+        }
+        return `
+          <tr>
+            <td><b>v${v.version_no}</b></td>
+            <td><span class="badge badge-${sCls}">${sLabel}</span> ${eff}</td>
+            <td>${v.rule_count} 条
+              <span class="item-meta"><span class="badge badge-high">高 ${v.severity_counts.high}</span>
+              <span class="badge badge-medium">警 ${v.severity_counts.medium}</span>
+              <span class="badge badge-low">提 ${v.severity_counts.low}</span></span>
+            </td>
+            <td class="item-meta">
+              来源：${v.source_of_version === "global"
+                ? `全局 ${escapeHtml(v.base_revision || "")}`
+                : `基于 v${rv.versions.find((x) => x.id === v.base_version_id)?.version_no ?? "?"}`}<br>
+              创建 ${fmtTime(v.created_at)}${v.published_at ? ` · 发布 ${fmtTime(v.published_at)}` : ""}
+              ${v.deactivated_at ? ` · 停用 ${fmtTime(v.deactivated_at)}` : ""}
+            </td>
+            <td class="item-meta">${escapeHtml(v.note || "")}</td>
+            <td><div class="rv-row-actions">${btns.join("")}</div></td>
+          </tr>`;
+      }).join("")
+    : '<tr><td colspan="6" class="hint">该方案还没有规则版本。新建草稿将克隆全局限定规则图。</td></tr>';
+
+  host.innerHTML = `
+    <div class="card-head">
+      <span class="item-title">${escapeHtml(plan?.name || "")}</span>
+      <span class="item-meta">全局限定规则图版本 ${escapeHtml(rv.globalRevision || state.revision || "-")}</span>
+    </div>
+    <div class="table-wrap">
+      <table class="grid rv-table">
+        <thead><tr><th>版本</th><th>状态</th><th>规则</th><th>时间</th><th>备注</th><th>操作</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div class="form-actions">
+      <button type="button" class="btn btn-small btn-primary" data-rv-act="new" ${hasDraft ? "disabled" : ""}>
+        ＋ 新建版本草稿${hasDraft ? "（已有草稿）" : ""}
+      </button>
+    </div>`;
+
+  host.querySelector("[data-rv-act='new']")?.addEventListener("click", async () => {
+    try {
+      const created = await api(`/api/plans/${state.rvPlanId}/rule-versions`, { method: "POST", body: {} });
+      await loadRvVersions(); await loadPlans();
+      openRvDraftEditor(created.id);
+    } catch (err) { toast(err.message, true); }
+  });
+
+  $$("button[data-rv-act]", host).forEach((btn) => {
+    btn.addEventListener("click", () => rvAction(btn.dataset.rvAct, Number(btn.dataset.id)));
+  });
+}
+
+async function rvAction(act, id) {
+  const v = rv.versions.find((x) => x.id === id);
+  try {
+    if (act === "edit") return openRvDraftEditor(id);
+    if (act === "rules") return openRvRulesView(id);
+    if (act === "diff") return openRvDiff(id);
+    if (act === "publish") {
+      if (!confirm(`确认发布 v${v.version_no}？发布后该方案判定立即改用此版本，原生效版本将被替代。`)) return;
+      await api(`/api/plans/${state.rvPlanId}/rule-versions/${id}/publish`, { method: "POST" });
+      await loadRvVersions(); await loadPlans();
+      renderRvList();
+      toast(`v${v.version_no} 已发布并生效`);
+      return;
+    }
+    if (act === "deactivate") {
+      if (!confirm(`确认停用 v${v.version_no}？停用后该方案判定将回落至全局限定规则图。`)) return;
+      await api(`/api/plans/${state.rvPlanId}/rule-versions/${id}/deactivate`, { method: "POST" });
+      await loadRvVersions(); await loadPlans();
+      renderRvList();
+      toast(`v${v.version_no} 已停用，不再参与判定`);
+      return;
+    }
+    if (act === "delete") {
+      if (!confirm(`删除草稿 v${v.version_no}？此操作不可撤销。`)) return;
+      await api(`/api/plans/${state.rvPlanId}/rule-versions/${id}`, { method: "DELETE" });
+      await loadRvVersions(); await loadPlans();
+      renderRvList();
+      toast("草稿已删除");
+      return;
+    }
+    if (act === "preview") return previewRvVersion(id);
+  } catch (err) { toast(err.message, true); }
+}
+
+/* ---------- 规则只读视图 ---------- */
+
+function openRvRulesView(id) {
+  const v = rv.versions.find((x) => x.id === id);
+  const host = $("#rvManagerBody");
+  const [sLabel, sCls] = rvStatusMeta[v.status] || [v.status, "blocked"];
+  host.innerHTML = `
+    <div class="card-head">
+      <h3 style="margin:0">v${v.version_no} 规则与严重级别依据
+        <span class="badge badge-${sCls}">${sLabel}</span></h3>
+      <button type="button" class="btn btn-small" data-rv-back>← 返回版本列表</button>
+    </div>
+    <p class="hint">创建于 ${fmtTime(v.created_at)}${v.published_at ? ` · 发布于 ${fmtTime(v.published_at)}` : ""}
+      ${v.note ? " · " + escapeHtml(v.note) : ""}</p>
+    <div class="finding-list">${v.rules.map((r) => `
+      <div class="finding-card ${r.severity}">
+        <div class="fc-title"><span class="badge badge-${r.severity}">${sevLabel[r.severity]}</span>
+          [${escapeHtml(r.id)}] ${escapeHtml(r.title)}
+          ${r.builtin ? '<span class="badge badge-ok">内置</span>' : ""}
+          ${r.directional ? '<span class="badge badge-blocked">有向</span>' : ""}</div>
+        <div class="fc-meta">${escapeHtml(catLabel(r.source))} → ${escapeHtml(catLabel(r.target))}</div>
+        <div class="fc-meta">${escapeHtml(r.reaction)}</div>
+        <div class="fc-meta">${escapeHtml(r.rationale)}</div>
+        <div class="fc-meta">${r.references.map((x) => `<span class="badge badge-low">${escapeHtml(x)}</span>`).join(" ")}</div>
+      </div>`).join("")}</div>`;
+  host.querySelector("[data-rv-back]").addEventListener("click", renderRvList);
+}
+
+/* ---------- 草稿编辑器 ---------- */
+
+function openRvDraftEditor(id) {
+  const v = rv.versions.find((x) => x.id === id);
+  if (!v) return;
+  if (v.status !== "draft") { toast("只有草稿可以编辑", true); return; }
+  rv.edit = { id, note: v.note || "", rules: JSON.parse(JSON.stringify(v.rules)) };
+  renderRvEditor();
+}
+
+function renderRvEditor() {
+  const host = $("#rvManagerBody");
+  const e = rv.edit;
+  host.innerHTML = `
+    <div class="card-head">
+      <h3 style="margin:0">编辑草稿 v${rv.versions.find((x) => x.id === e.id)?.version_no}</h3>
+      <button type="button" class="btn btn-small" data-rv-back>← 返回</button>
+    </div>
+    <label class="form-row">版本备注
+      <input type="text" id="rvNote" maxlength="2000" value="${escapeHtml(e.note)}" placeholder="本版变更说明，如：依据 GB 新标准将 R001 降为警示" />
+    </label>
+    <div class="card-head">
+      <h3>规则集合（${e.rules.length}）</h3>
+      <button type="button" class="btn btn-small" id="rvAddRule">＋ 新增规则</button>
+    </div>
+    <div class="table-wrap">
+      <table class="grid rv-table">
+        <thead><tr><th>编号</th><th>类别 A → B</th><th>严重级别</th><th>标题 / 方程式</th><th>操作</th></tr></thead>
+        <tbody>
+          ${e.rules.map((r) => `
+          <tr>
+            <td><b>${escapeHtml(r.id)}</b></td>
+            <td class="item-meta">${escapeHtml(catLabel(r.source))} → ${escapeHtml(catLabel(r.target))}
+              ${r.directional ? '<span class="badge badge-blocked">有向</span>' : ""}</td>
+            <td>
+              <select data-rv-sev="${r.id}">
+                <option value="high" ${r.severity === "high" ? "selected" : ""}>严重</option>
+                <option value="medium" ${r.severity === "medium" ? "selected" : ""}>警示</option>
+                <option value="low" ${r.severity === "low" ? "selected" : ""}>提示</option>
+              </select>
+            </td>
+            <td class="item-meta">${escapeHtml(r.title)}<br>${escapeHtml(r.reaction)}</td>
+            <td class="rv-row-actions">
+              <button type="button" class="btn btn-small" data-rv-editrule="${r.id}">编辑依据</button>
+              <button type="button" class="btn btn-small btn-danger" data-rv-delrule="${r.id}">移除</button>
+            </td>
+          </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>
+    <div id="rvRuleFormHost"></div>
+    <div class="form-actions">
+      <button type="button" class="btn" id="rvPreviewDraft">▶ 预览判定</button>
+      <button type="button" class="btn" id="rvSaveDraft">💾 保存草稿</button>
+      <button type="button" class="btn btn-primary" id="rvPublishDraft">🚩 保存并发布</button>
+    </div>`;
+
+  host.querySelector("[data-rv-back]").addEventListener("click", renderRvList);
+  host.querySelector("#rvNote").addEventListener("input", (ev) => (e.note = ev.target.value));
+  $$("select[data-rv-sev]", host).forEach((sel) => {
+    sel.addEventListener("change", () => {
+      const r = e.rules.find((x) => x.id === sel.dataset.rvSev);
+      if (r) r.severity = sel.value;
+    });
+  });
+  $$("button[data-rv-editrule]", host).forEach((b) =>
+    b.addEventListener("click", () => openRvRuleForm(host, b.dataset.rvEditrule)));
+  $$("button[data-rv-delrule]", host).forEach((b) =>
+    b.addEventListener("click", () => {
+      e.rules = e.rules.filter((x) => x.id !== b.dataset.rvDelrule);
+      renderRvEditor();
+    }));
+  host.querySelector("#rvAddRule").addEventListener("click", () => openRvRuleForm(host, null));
+  host.querySelector("#rvPreviewDraft").addEventListener("click", () => saveRvDraft(true).then(() => previewRvVersion(e.id)));
+  host.querySelector("#rvSaveDraft").addEventListener("click", () => saveRvDraft(false));
+  host.querySelector("#rvPublishDraft").addEventListener("click", async () => {
+    try {
+      await saveRvDraft(false, true);
+      await api(`/api/plans/${state.rvPlanId}/rule-versions/${e.id}/publish`, { method: "POST" });
+      await loadRvVersions(); await loadPlans();
+      renderRvList();
+      toast("草稿已发布并生效");
+    } catch (err) { toast(err.message, true); }
+  });
+}
+
+function openRvRuleForm(host, ruleId) {
+  const e = rv.edit;
+  const existing = ruleId ? e.rules.find((x) => x.id === ruleId) : null;
+  const r = existing ? JSON.parse(JSON.stringify(existing)) : {
+    id: "", source: "", target: "", directional: false, severity: "medium",
+    title: "", reaction: "", rationale: "", references: [], builtin: false,
+  };
+  const formHost = $("#rvRuleFormHost") || host;
+  formHost.innerHTML = `
+    <div class="rv-rule-form">
+      <div class="card-head"><h3>${existing ? "编辑规则依据" : "新增规则"}</h3></div>
+      <div class="form-row">
+        <label>编号<input type="text" id="rvRId" value="${escapeHtml(r.id)}" ${existing ? "disabled" : ""} placeholder="C101" /></label>
+        <label>级别
+          <select id="rvRSeverity">
+            <option value="high" ${r.severity === "high" ? "selected" : ""}>严重（命中即中止）</option>
+            <option value="medium" ${r.severity === "medium" ? "selected" : ""}>警示（继续）</option>
+            <option value="low" ${r.severity === "low" ? "selected" : ""}>提示</option>
+          </select>
+        </label>
+      </div>
+      <div class="form-row">
+        <label>类别 A<input type="text" id="rvRSource" value="${escapeHtml(r.source)}" placeholder="strong_acid" /></label>
+        <label>类别 B<input type="text" id="rvRTarget" value="${escapeHtml(r.target)}" placeholder="cyanide" /></label>
+      </div>
+      <label class="switch"><input type="checkbox" id="rvRDirectional" ${r.directional ? "checked" : ""}/> 有向规则（仅 A→B）</label>
+      <label>标题<input type="text" id="rvRTitle" value="${escapeHtml(r.title)}" /></label>
+      <label>反应方程式<textarea id="rvRReaction" rows="2">${escapeHtml(r.reaction)}</textarea></label>
+      <label>判定依据 / 机理解释<textarea id="rvRRationale" rows="3">${escapeHtml(r.rationale)}</textarea></label>
+      <label>参考文献（每行一条）<textarea id="rvRRefs" rows="2">${escapeHtml(r.references.join("\n"))}</textarea></label>
+      <div class="form-actions">
+        <button type="button" class="btn btn-primary" id="rvRSave">确认</button>
+        <button type="button" class="btn btn-ghost" id="rvRCancel">取消</button>
+      </div>
+    </div>`;
+  formHost.querySelector("#rvRCancel").addEventListener("click", () => (formHost.innerHTML = ""));
+  formHost.querySelector("#rvRSave").addEventListener("click", () => {
+    const data = {
+      ...r,
+      id: $("#rvRId").value.trim(),
+      source: $("#rvRSource").value.trim(),
+      target: $("#rvRTarget").value.trim(),
+      directional: $("#rvRDirectional").checked,
+      severity: $("#rvRSeverity").value,
+      title: $("#rvRTitle").value.trim(),
+      reaction: $("#rvRReaction").value.trim(),
+      rationale: $("#rvRRationale").value.trim(),
+      references: $("#rvRRefs").value.split("\n").map((s) => s.trim()).filter(Boolean),
+    };
+    if (!data.id || !data.source || !data.target) { toast("编号和类别 A/B 必填", true); return; }
+    if (data.source === data.target) { toast("两个类别不能相同", true); return; }
+    const other = e.rules.find((x) => x.id === data.id);
+    if (other && other !== existing) { toast(`规则编号 ${data.id} 已存在`, true); return; }
+    if (existing) {
+      const idx = e.rules.findIndex((x) => x.id === ruleId);
+      e.rules[idx] = data;
+    } else {
+      e.rules.push(data);
+    }
+    formHost.innerHTML = "";
+    renderRvEditor();
+  });
+}
+
+async function saveRvDraft(silent = false, _andPublish = false) {
+  const e = rv.edit;
+  if (!e) return false;
+  try {
+    const updated = await api(`/api/plans/${state.rvPlanId}/rule-versions/${e.id}`, {
+      method: "PUT",
+      body: { note: e.note, rules: e.rules },
+    });
+    const idx = rv.versions.findIndex((x) => x.id === e.id);
+    if (idx >= 0) rv.versions[idx] = updated;
+    if (!silent) toast("草稿已保存");
+    return true;
+  } catch (err) {
+    toast(err.message, true);
+    return false;
+  }
+}
+
+async function previewRvVersion(id) {
+  try {
+    const report = await api(
+      `/api/plans/${state.rvPlanId}/simulate?persist=false&rule_version_id=${id}`,
+      { method: "POST" },
+    );
+    const v = rv.versions.find((x) => x.id === id);
+    openModal(`
+      <button class="btn btn-ghost modal-close">✕ 关闭</button>
+      <h3>预览：按 v${v.version_no}（${escapeHtml((rvStatusMeta[v.status] || [v.status])[0])}）判定</h3>
+      <p class="hint">该结果不落盘、不影响正式判定；正式推演只读取当前生效版本。</p>
+      <div id="rvPreviewHost"></div>`);
+    $("#modalBox").classList.add("modal-wide");
+    renderReport(report, { container: $("#rvPreviewHost"), hideExport: true });
+  } catch (err) { toast(err.message, true); }
+}
+
+/* ---------- 版本差异 ---------- */
+
+function rvDiffOptions(selectedBase, selectedTarget) {
+  const opt = (val, label, sel) =>
+    `<option value="${val}" ${String(sel) === String(val) ? "selected" : ""}>${escapeHtml(label)}</option>`;
+  const globalOpt = (sel) => opt("global", `全局限定规则图（${rv.globalRevision || state.revision || "-"}）`, sel);
+  const verOpts = (sel) => rv.versions.map((v) =>
+    opt(v.id, `v${v.version_no} · ${(rvStatusMeta[v.status] || [v.status])[0]} · ${v.rule_count} 条`, sel)).join("");
+  return {
+    baseHtml: '<option value="">— 选择基准 —</option>' + globalOpt(selectedBase) + verOpts(selectedBase),
+    targetHtml: '<option value="global">全局限定规则图（当前）</option>' + verOpts(selectedTarget),
+  };
+}
+
+function openRvDiff(prefId) {
+  const host = $("#rvManagerBody");
+  const effId = rv.effectiveId;
+  // 默认对照 = 当前生效版本（无则全局）；默认基准 = 最近一个已替代版本（无则全局）
+  const newestSuperseded = rv.versions
+    .filter((v) => v.status === "superseded")
+    .sort((a, b) => b.version_no - a.version_no)[0];
+  let targetSel = effId ?? "global";
+  let baseSel = prefId
+    ?? newestSuperseded?.id
+    ?? (targetSel === "global"
+      ? (rv.versions.find((v) => v.status !== "draft")?.id ?? "global")
+      : "global");
+  if (String(baseSel) === String(targetSel) && baseSel !== "global") baseSel = "global";
+  const opts = rvDiffOptions(baseSel, targetSel);
+  host.innerHTML = `
+    <div class="card-head">
+      <h3 style="margin:0">🔀 规则版本差异</h3>
+      <button type="button" class="btn btn-small" data-rv-back>← 返回版本列表</button>
+    </div>
+    <div class="diff-picker">
+      <label>基准（旧）<select id="rvDiffBase">${opts.baseHtml}</select></label>
+      <span class="diff-arrow">→</span>
+      <label>对照（新）<select id="rvDiffTarget">${opts.targetHtml}</select></label>
+      <button type="button" class="btn btn-primary" id="rvRunDiff">🔍 比较</button>
+      <button type="button" class="btn hidden" id="rvExportDiff">⬇ 导出差异 JSON</button>
+    </div>
+    <div id="rvDiffBody"></div>`;
+  host.querySelector("[data-rv-back]").addEventListener("click", renderRvList);
+  host.querySelector("#rvRunDiff").addEventListener("click", runRvDiff);
+  host.querySelector("#rvExportDiff").addEventListener("click", () => {
+    if (rv.diff) downloadJson(rv.diff, `plan-${state.rvPlanId}-rule-diff.json`);
+  });
+}
+
+async function runRvDiff() {
+  const base = $("#rvDiffBase").value;
+  const target = $("#rvDiffTarget").value || "global";
+  if (!base) { toast("请选择基准版本", true); return; }
+  try {
+    const data = await api(
+      `/api/plans/${state.rvPlanId}/rule-versions/diff?base=${encodeURIComponent(base)}&target=${encodeURIComponent(target)}`
+    );
+    rv.diff = data;
+    renderRvDiffResult(data);
+    $("#rvExportDiff").classList.remove("hidden");
+  } catch (err) { toast(err.message, true); }
+}
+
+function rvSideLabel(side) {
+  if (side.kind === "global") return `全局规则图 ${escapeHtml(side.rule_revision || "")}`;
+  return `v${side.version_no} · ${escapeHtml(side.status_label)}`;
+}
+
+function renderRvDiffResult(d) {
+  const host = $("#rvDiffBody");
+  const c = d.changes;
+  const tags = {
+    added: '<span class="badge badge-ok diff-tag">🟢 新增规则</span>',
+    removed: '<span class="badge badge-blocked diff-tag">🔴 删除规则</span>',
+    severity: '<span class="badge badge-medium diff-tag">🔶 严重级别变化</span>',
+    basis: '<span class="badge badge-low diff-tag">📝 判定依据变化</span>',
+    unchanged: '<span class="badge badge-blocked diff-tag">⚪ 一致</span>',
+  };
+  const sev = (s) => s ? `<span class="badge badge-${s}">${sevLabel[s]}</span>` : "—";
+  host.innerHTML = `
+    <div class="diff-sides" style="margin:10px 0">
+      <div class="diff-side"><div class="item-title">基准</div><div class="item-meta">${rvSideLabel(d.base)}</div>
+        <div class="item-meta">${d.rule_count.base} 条规则</div></div>
+      <div class="diff-arrow-big">→</div>
+      <div class="diff-side"><div class="item-title">对照</div><div class="item-meta">${rvSideLabel(d.target)}</div>
+        <div class="item-meta">${d.rule_count.target} 条规则</div></div>
+    </div>
+    <p class="hint">🟢 新增 ${c.added} ｜ 🔴 删除 ${c.removed} ｜ 🔶 级别变化 ${c.severity}
+      ｜ 📝 依据变化 ${c.basis} ｜ ⚪ 一致 ${c.unchanged}</p>
+    <div class="finding-list">
+      ${d.rules.filter((e) => e.change !== "unchanged").map((e) => {
+        const cur = e.target || e.base;
+        return `
+        <div class="finding-card ${e.target_severity || e.base_severity || ""}">
+          <div class="fc-title">${tags[e.change]} <b>[${escapeHtml(e.rule_id)}]</b> ${escapeHtml(cur.title || "")}</div>
+          <div class="fc-meta">${escapeHtml(catLabel(cur.source))} → ${escapeHtml(catLabel(cur.target))}</div>
+          <div class="fc-meta">严重级别：${sev(e.base_severity)} → ${sev(e.target_severity)}</div>
+          ${e.changed_fields.length ? `<div class="fc-meta">变化字段：${e.field_labels.map((f) => `<span class="badge badge-low">${escapeHtml(f)}</span>`).join(" ")}</div>` : ""}
+          <div class="fc-meta">${escapeHtml(cur.reaction || "")}</div>
+        </div>`;
+      }).join("") || '<p class="hint">两个版本完全一致。</p>'}
+    </div>`;
 }
 
 /* ---------------- 工具 ---------------- */

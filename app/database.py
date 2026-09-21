@@ -1,5 +1,5 @@
 """SQLite 数据库与会话。"""
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from .config import DATABASE_URL
@@ -38,3 +38,20 @@ def init_db():
     from . import models  # noqa: F401  确保模型已注册
 
     Base.metadata.create_all(bind=engine)
+    _ensure_columns()
+
+
+def _ensure_columns():
+    """对旧版本数据库补齐新增列（SQLite 不支持自动 ALTER，显式检查）。"""
+    inspector = inspect(engine)
+    additions = {
+        "runs": [("rule_version_id", "INTEGER REFERENCES rule_versions(id) ON DELETE SET NULL")],
+    }
+    with engine.begin() as conn:
+        for table, cols in additions.items():
+            if table not in inspector.get_table_names():
+                continue
+            existing = {c["name"] for c in inspector.get_columns(table)}
+            for name, ddl in cols:
+                if name not in existing:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))

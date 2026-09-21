@@ -26,6 +26,7 @@ def list_runs(limit: int = 100, db: Session = Depends(get_db)):
             "plan_id": r.plan_id,
             "plan_name": r.plan_name,
             "rule_revision": r.rule_revision,
+            "rule_version_id": r.rule_version_id,
             "status": r.status,
             "created_at": r.created_at,
         }

@@ -419,3 +419,62 @@ textarea { resize: vertical; }
   .diff-summary-grid { grid-template-columns: 1fr; }
   .diff-cell-wide { grid-column: auto; }
 }
+
+/* ---------- 方案规则版本 ---------- */
+.rv-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: 12px 0 6px;
+}
+.rv-bar-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--ink-soft);
+  min-width: 260px;
+}
+.rv-bar-label select {
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 14px;
+  background: #fff;
+  color: var(--ink);
+}
+.rv-effective {
+  flex: 1;
+  min-width: 240px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.rv-manager-body { margin-top: 12px; }
+.rv-table td { vertical-align: top; }
+.rv-row-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.rv-rule-form {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  background: #fafbfc;
+}
+.rv-rule-form label { display: block; margin-bottom: 8px; font-size: 13px; color: var(--ink-soft); }
+.rv-rule-form input[type="text"],
+.rv-rule-form textarea,
+.rv-rule-form select {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 13.5px;
+  margin-top: 3px;
+  font-family: inherit;
+}
