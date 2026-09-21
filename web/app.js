@@ -10,6 +10,9 @@ const state = {
   rules: [],
   categories: {},
   revision: "",
+  effectiveVersion: null, // 当前生效的规则版本（null = 判定使用实时规则图）
+  scheme: null,           // 默认规则方案详情（含版本列表）
+  verDiff: null,
   stepRows: [],          // 方案编辑器中的步骤行
   editingStepReagents: [],
   customCats: new Set(),
@@ -58,10 +61,10 @@ $$(".tab").forEach((btn) => {
     $$(".tab").forEach((b) => b.classList.toggle("active", b === btn));
     $$(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === `tab-${btn.dataset.tab}`));
     if (btn.dataset.tab === "rules") setTimeout(renderGraph, 60);
+    if (btn.dataset.tab === "rules") loadScheme().catch((e) => toast(e.message, true));
     if (btn.dataset.tab === "runs") loadRuns();
   });
 });
-
 /* ---------------- 数据加载 ---------------- */
 
 async function loadReagents() {
@@ -81,10 +84,25 @@ async function loadRules() {
   state.rules = data.rules;
   state.categories = data.categories;
   state.revision = data.revision;
-  $("#ruleRev").textContent = `规则图版本 ${data.revision} · ${data.rules.length} 条规则 · ${Object.keys(data.categories).length} 个类别`;
+  state.effectiveVersion = data.effective_version || null;
+  const eff = state.effectiveVersion;
+  $("#ruleRev").textContent = eff
+    ? `规则版本 v${eff.version_no} 生效中（${data.revision}）· ${data.rules.length} 条规则 · ${Object.keys(data.categories).length} 个类别`
+    : `规则图版本 ${data.revision} · ${data.rules.length} 条规则 · ${Object.keys(data.categories).length} 个类别`;
   renderRuleList();
   renderCategoryChips();
   renderGraph();
+}
+
+async function loadScheme() {
+  const data = await api("/api/rule-schemes");
+  if (!data.schemes.length) {
+    state.scheme = null;
+    renderScheme();
+    return;
+  }
+  state.scheme = await api(`/api/rule-schemes/${data.schemes[0].id}`);
+  renderScheme();
 }
 
 const catLabel = (key) => state.categories[key]?.label || key;
@@ -751,6 +769,500 @@ $("#ruleForm").addEventListener("submit", async (e) => {
   } catch (err) { toast(err.message, true); }
 });
 
+/* ---------------- 规则方案版本 ---------------- */
+
+const VER_STATUS = {
+  draft: ["草稿", "blocked"],
+  published: ["生效中", "ok"],
+  disabled: ["已停用", "off"],
+};
+
+async function refreshRuleVersionState() {
+  // 版本生命周期操作后：规则来源可能已切换，需同时刷新规则图与方案版本
+  await Promise.all([loadRules(), loadScheme()]);
+}
+
+function renderScheme() {
+  const effBox = $("#schemeEffective");
+  const hint = $("#schemeHint");
+  const ul = $("#versionList");
+  if (!effBox || !ul) return;
+  const scheme = state.scheme;
+  if (!scheme) {
+    effBox.innerHTML = "";
+    hint.textContent = "";
+    ul.innerHTML = '<p class="hint">规则方案未初始化。</p>';
+    renderVerDiffPickers();
+    return;
+  }
+  const cur = scheme.current_version;
+  effBox.innerHTML = cur
+    ? `<div class="ver-effective on">
+         <span class="badge badge-ok">当前生效</span>
+         <b>v${cur.version_no}</b>
+         <span class="item-meta">发布于 ${fmtTime(cur.published_at)} · ${cur.rule_count} 条规则 ·
+           严重 ${cur.severity_counts.high} / 警示 ${cur.severity_counts.medium} / 提示 ${cur.severity_counts.low}</span>
+       </div>`
+    : `<div class="ver-effective">
+         <span class="badge badge-blocked">未发布版本</span>
+         <span class="item-meta">判定当前使用<b>实时规则图</b>（${escapeHtml(state.revision)}）</span>
+       </div>`;
+  hint.textContent = cur
+    ? `版本生效模式：推演只读取生效版本 v${cur.version_no} 的快照；实时规则图的改动需「创建版本 → 发布」后才会参与判定。`
+    : "未发布版本时推演直接读取实时规则图；创建并发布版本后，判定将只读取生效版本快照，停用后回退。";
+
+  ul.innerHTML = "";
+  if (!scheme.versions.length) {
+    ul.innerHTML = '<p class="hint">暂无版本。点击右上角「创建版本」对当前规则图做快照，发布后成为判定依据。</p>';
+  }
+  scheme.versions.forEach((v) => {
+    const [label, cls] = VER_STATUS[v.status] || [v.status, "blocked"];
+    const li = document.createElement("li");
+    li.className = "item";
+    li.innerHTML = `
+      <div class="item-title">
+        <span class="badge badge-${cls}">${label}</span>
+        <b>v${v.version_no}</b>
+        ${v.note ? `<span class="item-meta">${escapeHtml(v.note)}</span>` : ""}
+      </div>
+      <div class="item-meta">
+        <span>${v.rule_count} 条规则（启用 ${v.active_count}）</span>
+        <span>严重 ${v.severity_counts.high} / 警示 ${v.severity_counts.medium} / 提示 ${v.severity_counts.low}</span>
+      </div>
+      <div class="item-meta">
+        <span>创建于 ${fmtTime(v.created_at)}</span>
+        ${v.published_at ? `<span>发布于 ${fmtTime(v.published_at)}</span>` : ""}
+        ${v.disabled_at ? `<span>停用于 ${fmtTime(v.disabled_at)}</span>` : ""}
+      </div>`;
+    const actions = document.createElement("div");
+    actions.className = "item-actions";
+    actions.append(
+      actionBtn("查看", "btn-small", () => openVersionModal(v.id)),
+      actionBtn("对比", "btn-small", () => pickVersionForDiff(v)),
+    );
+    if (v.status === "draft") {
+      actions.append(
+        actionBtn("编辑草稿", "btn-small", () => openDraftEditor(v.id)),
+        actionBtn("发布", "btn-small btn-primary", () => publishVersion(v)),
+        actionBtn("删除", "btn-small btn-danger", () => removeVersion(v)),
+      );
+    } else if (v.status === "published") {
+      actions.append(actionBtn("停用", "btn-small btn-danger", () => disableVersion(v)));
+    } else if (v.status === "disabled") {
+      actions.append(actionBtn("重新发布", "btn-small", () => publishVersion(v)));
+    }
+    li.appendChild(actions);
+    ul.appendChild(li);
+  });
+  renderVerDiffPickers();
+}
+
+$("#btnCreateVersion").addEventListener("click", async () => {
+  if (!state.scheme) { toast("规则方案尚未加载完成", true); return; }
+  const note = prompt("版本变更说明（可留空）：", "");
+  if (note === null) return;
+  try {
+    const v = await api(`/api/rule-schemes/${state.scheme.id}/versions`, {
+      method: "POST",
+      body: { note: note.trim() || null },
+    });
+    toast(`已创建草稿版本 v${v.version_no}，发布后生效`);
+    await loadScheme();
+  } catch (err) { toast(err.message, true); }
+});
+
+async function publishVersion(v) {
+  if (!confirm(`发布版本 v${v.version_no}？发布后推演将只读取该版本快照，原生效版本自动停用。`)) return;
+  try {
+    await api(`/api/rule-schemes/${state.scheme.id}/versions/${v.id}/publish`, { method: "POST" });
+    toast(`版本 v${v.version_no} 已发布，判定即刻切换`);
+    await refreshRuleVersionState();
+  } catch (err) { toast(err.message, true); }
+}
+
+async function disableVersion(v) {
+  if (!confirm(`停用版本 v${v.version_no}？停用后该版本不再参与判定，推演回退到实时规则图。`)) return;
+  try {
+    await api(`/api/rule-schemes/${state.scheme.id}/versions/${v.id}/disable`, { method: "POST" });
+    toast(`版本 v${v.version_no} 已停用`);
+    await refreshRuleVersionState();
+  } catch (err) { toast(err.message, true); }
+}
+
+async function removeVersion(v) {
+  if (!confirm(`删除草稿版本 v${v.version_no}？`)) return;
+  try {
+    await api(`/api/rule-schemes/${state.scheme.id}/versions/${v.id}`, { method: "DELETE" });
+    toast("草稿版本已删除");
+    await loadScheme();
+  } catch (err) { toast(err.message, true); }
+}
+
+/* -------- 版本详情（只读） -------- */
+
+function verRuleRow(r) {
+  const rationale = r.rationale || "";
+  return `
+    <div class="finding-card ${r.severity}">
+      <div class="fc-title">
+        <span class="badge badge-${r.severity}">${sevLabel[r.severity]}</span>
+        [${escapeHtml(r.id)}] ${escapeHtml(r.title)}
+        ${!r.active ? '<span class="badge badge-off">已停用</span>' : ""}
+        ${r.directional ? '<span class="badge badge-blocked">有向</span>' : ""}
+      </div>
+      <div class="fc-meta">${escapeHtml(catLabel(r.source))} → ${escapeHtml(catLabel(r.target))} · ${escapeHtml(r.reaction)}</div>
+      <div class="fc-meta">${escapeHtml(rationale).slice(0, 120)}${rationale.length > 120 ? "…" : ""}</div>
+    </div>`;
+}
+
+async function openVersionModal(versionId) {
+  try {
+    const v = await api(`/api/rule-schemes/${state.scheme.id}/versions/${versionId}`);
+    const [label, cls] = VER_STATUS[v.status] || [v.status, "blocked"];
+    openModal(`
+      <button class="btn btn-ghost modal-close">✕ 关闭</button>
+      <h3><span class="badge badge-${cls}">${label}</span> 规则版本 v${v.version_no}</h3>
+      <div class="m-row"><div class="m-k">变更时间</div>
+        <div>创建于 ${fmtTime(v.created_at)}
+          ${v.published_at ? ` · 发布于 ${fmtTime(v.published_at)}` : ""}
+          ${v.disabled_at ? ` · 停用于 ${fmtTime(v.disabled_at)}` : ""}</div>
+      </div>
+      ${v.note ? `<div class="m-row"><div class="m-k">变更说明</div><div>${escapeHtml(v.note)}</div></div>` : ""}
+      <div class="m-row"><div class="m-k">规则快照（${v.rule_count} 条，启用 ${v.active_count} 条；严重级别依据随版本冻结）</div>
+        <div class="finding-list" style="margin-top:8px">${v.rules.map(verRuleRow).join("")}</div>
+      </div>
+    `);
+    $("#modalBox").classList.add("modal-wide");
+  } catch (err) { toast(err.message, true); }
+}
+
+/* -------- 草稿编辑 -------- */
+
+async function openDraftEditor(versionId) {
+  let v;
+  try {
+    v = await api(`/api/rule-schemes/${state.scheme.id}/versions/${versionId}`);
+  } catch (err) { toast(err.message, true); return; }
+  if (v.status !== "draft") { toast("仅草稿版本可编辑", true); return; }
+
+  openModal(`
+    <button class="btn btn-ghost modal-close">✕ 关闭</button>
+    <h3>编辑草稿 · 版本 v${v.version_no}</h3>
+    <p class="hint">修改仅保存在草稿中，发布后才参与判定。点击单条规则可编辑严重级别与判定依据。</p>
+    <div class="m-row">
+      <div class="m-k">变更说明</div>
+      <div style="display:flex;gap:8px">
+        <input type="text" id="draftNote" maxlength="500" value="${escapeHtml(v.note || "")}" placeholder="本次版本调整了哪些规则、原因" />
+        <button class="btn btn-small" id="btnSaveNote" style="white-space:nowrap">保存说明</button>
+      </div>
+    </div>
+    <div class="m-row"><div class="m-k">规则（${v.rule_count} 条）</div>
+      <div class="finding-list" id="draftRuleList" style="margin-top:8px">
+        ${v.rules.map((r) => `
+          <div class="finding-card ${r.severity} draft-rule" data-rid="${escapeHtml(r.id)}">
+            <div class="fc-title">
+              <span class="badge badge-${r.severity}">${sevLabel[r.severity]}</span>
+              [${escapeHtml(r.id)}] ${escapeHtml(r.title)}
+              ${!r.active ? '<span class="badge badge-off">已停用</span>' : ""}
+            </div>
+            <div class="fc-meta">${escapeHtml(catLabel(r.source))} → ${escapeHtml(catLabel(r.target))} · 点击编辑级别与依据</div>
+          </div>`).join("")}
+      </div>
+    </div>
+  `);
+  $("#modalBox").classList.add("modal-wide");
+
+  $("#btnSaveNote").addEventListener("click", async () => {
+    try {
+      await api(`/api/rule-schemes/${state.scheme.id}/versions/${versionId}`, {
+        method: "PUT",
+        body: { note: $("#draftNote").value.trim() || null },
+      });
+      toast("变更说明已保存");
+      await loadScheme();
+    } catch (err) { toast(err.message, true); }
+  });
+  $$(".draft-rule", $("#modalBox")).forEach((el) => {
+    el.addEventListener("click", () => openDraftRuleForm(versionId, el.dataset.rid));
+  });
+}
+
+async function openDraftRuleForm(versionId, ruleId) {
+  let v;
+  try {
+    v = await api(`/api/rule-schemes/${state.scheme.id}/versions/${versionId}`);
+  } catch (err) { toast(err.message, true); return; }
+  const r = v.rules.find((x) => x.id === ruleId);
+  if (!r) { toast("规则不存在", true); return; }
+
+  openModal(`
+    <button class="btn btn-ghost modal-close">✕ 关闭</button>
+    <h3>草稿规则 [${escapeHtml(r.id)}]</h3>
+    <div class="form" style="margin-top:10px">
+      <div class="form-row">
+        <label>严重级别
+          <select id="drSeverity">
+            <option value="high" ${r.severity === "high" ? "selected" : ""}>严重（命中即中止）</option>
+            <option value="medium" ${r.severity === "medium" ? "selected" : ""}>警示（记录并继续）</option>
+            <option value="low" ${r.severity === "low" ? "selected" : ""}>提示</option>
+          </select>
+        </label>
+        <label>类别对
+          <input type="text" value="${escapeHtml(catLabel(r.source))} → ${escapeHtml(catLabel(r.target))}" disabled />
+        </label>
+      </div>
+      <label class="switch"><input type="checkbox" id="drActive" ${r.active ? "checked" : ""} /> 在该版本中启用（停用后不参与判定）</label>
+      <label>标题<input type="text" id="drTitle" value="${escapeHtml(r.title)}" /></label>
+      <label>反应方程式<textarea id="drReaction" rows="2">${escapeHtml(r.reaction)}</textarea></label>
+      <label>判定依据 / 机理解释<textarea id="drRationale" rows="4">${escapeHtml(r.rationale)}</textarea></label>
+      <label>参考文献（每行一条）<textarea id="drRefs" rows="2">${escapeHtml((r.references || []).join("\n"))}</textarea></label>
+      <div class="form-actions">
+        <button class="btn btn-primary" id="btnDraftRuleSave">💾 保存到草稿</button>
+        <button class="btn" id="btnDraftRuleBack">← 返回规则列表</button>
+      </div>
+    </div>
+  `);
+  $("#modalBox").classList.add("modal-wide");
+
+  $("#btnDraftRuleBack").addEventListener("click", () => openDraftEditor(versionId));
+  $("#btnDraftRuleSave").addEventListener("click", async () => {
+    try {
+      await api(`/api/rule-schemes/${state.scheme.id}/versions/${versionId}/rules/${encodeURIComponent(ruleId)}`, {
+        method: "PATCH",
+        body: {
+          severity: $("#drSeverity").value,
+          active: $("#drActive").checked,
+          title: $("#drTitle").value.trim(),
+          reaction: $("#drReaction").value.trim(),
+          rationale: $("#drRationale").value.trim(),
+          references: $("#drRefs").value.split("\n").map((s) => s.trim()).filter(Boolean),
+        },
+      });
+      toast(`规则 ${ruleId} 已保存到草稿`);
+      await loadScheme();
+      openDraftEditor(versionId);
+    } catch (err) { toast(err.message, true); }
+  });
+}
+
+/* -------- 版本差异 -------- */
+
+function verOptionLabel(v) {
+  const [label] = VER_STATUS[v.status] || [v.status];
+  return `v${v.version_no} · ${label} · ${v.rule_count} 条规则 · ${fmtTime(v.created_at)}`;
+}
+
+function renderVerDiffPickers() {
+  const baseSel = $("#verDiffBase");
+  const targetSel = $("#verDiffTarget");
+  if (!baseSel || !targetSel) return;
+  const versions = (state.scheme?.versions || []).slice().sort((a, b) => a.version_no - b.version_no);
+  const build = (sel) => {
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">— 请选择版本 —</option>' +
+      versions.map((v) => `<option value="${v.id}">${escapeHtml(verOptionLabel(v))}</option>`).join("");
+    if (cur && versions.some((v) => String(v.id) === String(cur))) sel.value = cur;
+  };
+  build(baseSel);
+  build(targetSel);
+}
+
+function pickVersionForDiff(v) {
+  const baseSel = $("#verDiffBase");
+  const targetSel = $("#verDiffTarget");
+  if (!baseSel.value) baseSel.value = String(v.id);
+  else if (String(baseSel.value) === String(v.id)) targetSel.value = String(v.id);
+  else if (!targetSel.value || String(targetSel.value) === String(v.id)) targetSel.value = String(v.id);
+  else baseSel.value = String(v.id);
+  toast("已选入版本差异比较");
+  $("#verDiffBase").scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+$("#btnVerDiffSwap")?.addEventListener("click", () => {
+  const b = $("#verDiffBase").value;
+  $("#verDiffBase").value = $("#verDiffTarget").value;
+  $("#verDiffTarget").value = b;
+});
+
+$("#btnVerDiff")?.addEventListener("click", async () => {
+  const baseId = $("#verDiffBase").value;
+  const targetId = $("#verDiffTarget").value;
+  if (!baseId || !targetId) { toast("请先选择两个规则版本", true); return; }
+  if (baseId === targetId) { toast("两个版本不能相同", true); return; }
+  try {
+    const diff = await api(`/api/rule-schemes/${state.scheme.id}/diff?base_id=${baseId}&target_id=${targetId}`);
+    state.verDiff = diff;
+    renderVerDiff(diff);
+  } catch (err) { toast(err.message, true); }
+});
+
+const VER_DIFF_FILTERS = [
+  { key: "all", label: "全部" },
+  { key: "changed", label: "仅变化" },
+  { key: "added", label: "🟢 新增" },
+  { key: "removed", label: "🔴 移除" },
+  { key: "severity", label: "🔶 级别变化" },
+  { key: "active", label: "⏻ 启停变化" },
+  { key: "basis", label: "📝 依据变化" },
+  { key: "unchanged", label: "⚪ 一致" },
+];
+
+const verBasisFieldLabels = {
+  source: "类别 A", target: "类别 B", directional: "规则方向", severity: "严重级别",
+  active: "启停状态", title: "规则标题", reaction: "反应方程式",
+  rationale: "机理解释", references: "参考文献",
+};
+
+function renderVerDiff(diff) {
+  const host = $("#verDiffDetail");
+  const c = diff.summary.rule_changes;
+  const sevRows = diff.summary.severity_counts.map((x) => `
+    <tr class="${x.delta !== 0 ? "diff-row-chg" : ""}">
+      <td>${x.label}</td><td>${x.base}</td><td>${x.target}</td>
+      <td>${x.delta === 0 ? "—" : (x.delta > 0 ? `<span class="diff-add">＋${x.delta}</span>` : `<span class="diff-rm">${x.delta}</span>`)}</td>
+    </tr>`).join("");
+  host.innerHTML = `
+    <div class="card">
+      <div class="card-head">
+        <h2>🔀 规则版本差异 · ${escapeHtml(diff.scheme_name)}</h2>
+        <span class="item-meta">基准 v${diff.base.version_no} → 对照 v${diff.target.version_no}</span>
+      </div>
+      <div class="diff-sides">
+        ${renderVerDiffSide(diff.base)}
+        <div class="diff-arrow-big">→</div>
+        ${renderVerDiffSide(diff.target)}
+      </div>
+      <div class="diff-summary-grid">
+        <div class="diff-cell">
+          <div class="m-k">严重级别分布</div>
+          <table class="grid diff-count-table">
+            <thead><tr><th>级别</th><th>基准</th><th>对照</th><th>增减</th></tr></thead>
+            <tbody>${sevRows}</tbody>
+          </table>
+        </div>
+        <div class="diff-cell">
+          <div class="m-k">启用规则数</div>
+          <div class="item-meta">基准：${diff.summary.active_count.base} 条启用</div>
+          <div class="item-meta">对照：${diff.summary.active_count.target} 条启用</div>
+          ${diff.summary.active_count.base !== diff.summary.active_count.target
+            ? `<div class="diff-add">变化 ${diff.summary.active_count.target - diff.summary.active_count.base > 0 ? "＋" : ""}${diff.summary.active_count.target - diff.summary.active_count.base}</div>`
+            : '<div class="item-meta diff-same">— 无变化 —</div>'}
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <h2>规则差异列表</h2>
+        <div class="diff-filters" id="verDiffFilters">
+          ${VER_DIFF_FILTERS.map((f, i) => `<button type="button" class="btn btn-small diff-filter${i === 1 ? " active" : ""}" data-filter="${f.key}">${f.label}</button>`).join("")}
+          <input type="search" id="verDiffSearch" class="search" placeholder="规则编号 / 标题…" />
+        </div>
+      </div>
+      <p class="hint">
+        🟢 新增 ${c.added} ｜ 🔴 移除 ${c.removed} ｜ 🔶 级别变化 ${c.severity} ｜ ⏻ 启停变化 ${c.active} ｜ 📝 依据变化 ${c.basis} ｜ ⚪ 一致 ${c.unchanged}
+      </p>
+      <div class="finding-list" id="verDiffRuleList"></div>
+    </div>`;
+
+  $$(".diff-filter", host).forEach((btn) => {
+    btn.addEventListener("click", () => {
+      $$(".diff-filter", host).forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      renderVerDiffRules(diff);
+    });
+  });
+  $("#verDiffSearch", host).addEventListener("input", () => renderVerDiffRules(diff));
+  renderVerDiffRules(diff);
+  host.scrollIntoView?.({ behavior: "smooth", block: "start" });
+}
+
+function renderVerDiffSide(v) {
+  const [label, cls] = VER_STATUS[v.status] || [v.status, "blocked"];
+  return `
+    <div class="diff-side">
+      <div class="item-title">版本 v${v.version_no} <span class="badge badge-${cls}">${label}</span></div>
+      <div class="item-meta">创建于 ${fmtTime(v.created_at)}${v.published_at ? ` · 发布于 ${fmtTime(v.published_at)}` : ""}</div>
+      <div class="item-meta">${v.rule_count} 条规则 · 严重 ${v.severity_counts.high} / 警示 ${v.severity_counts.medium} / 提示 ${v.severity_counts.low}</div>
+      ${v.note ? `<div class="item-meta">${escapeHtml(v.note)}</div>` : ""}
+    </div>`;
+}
+
+let __verDiffSeq = 0;
+function renderVerDiffRules(diff) {
+  const box = $("#verDiffRuleList");
+  if (!box) return;
+  const filter = ($$("#verDiffFilters .diff-filter.active")[0]?.dataset.filter) || "changed";
+  const q = ($("#verDiffSearch").value || "").toLowerCase();
+  const items = diff.rules.filter((e) => {
+    if (filter === "changed" && e.change === "unchanged") return false;
+    if (filter !== "all" && filter !== "changed" && e.change !== filter) return false;
+    if (q) {
+      const hay = [e.rule_id, e.base?.title, e.target?.title, e.base?.reaction, e.target?.reaction]
+        .filter(Boolean).join(" ").toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+  box.innerHTML = items.length
+    ? items.map((e) => {
+        e._id = e._id ?? `vd${++__verDiffSeq}`;
+        const cur = e.target || e.base;
+        const sevHtml = (s) => s ? `<span class="badge badge-${s}">${sevLabel[s]}</span>` : '<span class="item-meta">无</span>';
+        let head;
+        if (e.change === "added") head = '<span class="badge badge-ok diff-tag">🟢 新增规则</span>';
+        else if (e.change === "removed") head = '<span class="badge badge-blocked diff-tag">🔴 移除规则</span>';
+        else if (e.change === "severity") head = `<span class="badge badge-medium diff-tag">🔶 ${sevHtml(e.base_severity)} → ${sevHtml(e.target_severity)}</span>`;
+        else if (e.change === "active") head = '<span class="badge badge-medium diff-tag">⏻ 启停状态变化</span>';
+        else if (e.change === "basis") head = '<span class="badge badge-low diff-tag">📝 判定依据变化</span>';
+        else head = '<span class="badge badge-blocked diff-tag">⚪ 一致</span>';
+        const fieldTags = e.changed_fields.length
+          ? `<div class="item-meta">变化字段：${e.changed_fields.map((f) => `<span class="badge badge-low">${verBasisFieldLabels[f] || f}</span>`).join(" ")}</div>`
+          : "";
+        return `
+          <div class="finding-card diff-finding ${e.target_severity || e.base_severity || ""}" data-id="${e._id}">
+            <div class="fc-title">${head} <b>[${escapeHtml(e.rule_id)}]</b> ${escapeHtml(cur.title || "")}</div>
+            <div class="fc-meta">${escapeHtml(catLabel(cur.source))} → ${escapeHtml(catLabel(cur.target))} · ${escapeHtml(cur.reaction || "")}</div>
+            ${fieldTags}
+          </div>`;
+      }).join("")
+    : '<p class="hint">没有符合筛选条件的差异条目。</p>';
+  $$(".diff-finding", box).forEach((el) => {
+    el.addEventListener("click", () => {
+      const e = diff.rules.find((x) => x._id === el.dataset.id);
+      if (e) openVerDiffRuleModal(e, diff);
+    });
+  });
+}
+
+function openVerDiffRuleModal(e, diff) {
+  const row = (label, a, b) => `<tr><td class="m-k">${label}</td><td>${a ?? "—"}</td><td>${b ?? "—"}</td></tr>`;
+  const a = e.base, b = e.target;
+  const sev = (s) => s ? `<span class="badge badge-${s}">${sevLabel[s]}</span>` : "—";
+  const refs = (arr) => (arr && arr.length) ? arr.map((x) => `· ${escapeHtml(x)}`).join("<br>") : "—";
+  const onoff = (x) => (x ? "启用" : "停用");
+  openModal(`
+    <button class="btn btn-ghost modal-close">✕ 关闭</button>
+    <h3>${e.change_label} · [${escapeHtml(e.rule_id)}] ${escapeHtml((b || a).title || "")}</h3>
+    <div class="item-meta">基准版本 v${diff.base.version_no} → 对照版本 v${diff.target.version_no}</div>
+    <table class="grid diff-modal-table">
+      <thead><tr><th></th><th>基准（旧）</th><th>对照（新）</th></tr></thead>
+      <tbody>
+        ${row("严重级别", a ? sev(a.severity) : "—", b ? sev(b.severity) : "—")}
+        ${row("启用状态", a ? onoff(a.active) : "—", b ? onoff(b.active) : "—")}
+        ${row("类别对", a ? `${escapeHtml(catLabel(a.source))} → ${escapeHtml(catLabel(a.target))}${a.directional ? "（有向）" : ""}` : "—",
+                b ? `${escapeHtml(catLabel(b.source))} → ${escapeHtml(catLabel(b.target))}${b.directional ? "（有向）" : ""}` : "—")}
+        ${row("反应方程式", a ? `<span class="m-eq">${escapeHtml(a.reaction)}</span>` : "—",
+                b ? `<span class="m-eq">${escapeHtml(b.reaction)}</span>` : "—")}
+        ${row("机理解释", a ? escapeHtml(a.rationale).replace(/\n/g, "<br>") : "—",
+                b ? escapeHtml(b.rationale).replace(/\n/g, "<br>") : "—")}
+        ${row("参考文献", a ? refs(a.references) : "—", b ? refs(b.references) : "—")}
+      </tbody>
+    </table>
+    ${e.changed_fields.length ? `<p class="hint">变化字段：${e.changed_fields.map((f) => verBasisFieldLabels[f] || f).join("、")}</p>` : ""}
+  `);
+  $("#modalBox").classList.add("modal-wide");
+}
+
 /* ---------------- 规则图（力导向 SVG） ---------------- */
 
 const graph = { nodes: {}, edges: [], sim: null };
@@ -1339,7 +1851,7 @@ function fmtTime(iso) {
   renderStepRows();
   renderCategoryChips();
   try {
-    await Promise.all([loadReagents(), loadPlans(), loadRules()]);
+    await Promise.all([loadReagents(), loadPlans(), loadRules(), loadScheme()]);
   } catch (err) {
     toast("初始化失败：" + err.message, true);
   }

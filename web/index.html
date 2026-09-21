@@ -140,6 +140,36 @@
         </div>
       </div>
 
+      <!-- 规则方案版本 -->
+      <div class="card">
+        <div class="card-head">
+          <h2>📦 规则方案版本</h2>
+          <button class="btn btn-small btn-primary" id="btnCreateVersion">＋ 创建版本（快照当前规则图）</button>
+        </div>
+        <div id="schemeEffective"></div>
+        <p class="hint" id="schemeHint"></p>
+        <ul class="item-list" id="versionList"></ul>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>🔀 版本差异比较</h2>
+          <button class="btn btn-small" id="btnVerDiffSwap" title="交换基准与对照">⇄ 交换</button>
+        </div>
+        <p class="hint">比较同一规则方案的两个版本：按规则编号对齐，识别新增 / 移除 / 严重级别 / 启停 / 判定依据变化。</p>
+        <div class="diff-picker">
+          <label>基准版本（旧）
+            <select id="verDiffBase"></select>
+          </label>
+          <span class="diff-arrow">→</span>
+          <label>对照版本（新）
+            <select id="verDiffTarget"></select>
+          </label>
+          <button class="btn btn-primary" id="btnVerDiff">🔍 比较版本差异</button>
+        </div>
+      </div>
+      <div id="verDiffDetail"></div>
+
       <div class="layout-two">
         <div class="card">
           <div class="card-head"><h2>规则列表</h2>

@@ -3,7 +3,7 @@ import json
 
 from sqlalchemy.orm import Session
 
-from . import engine, models, rules_store
+from . import engine, models, rule_versions
 
 
 def _step_categories(db: Session, step: models.Step) -> list[str]:
@@ -35,15 +35,12 @@ def plan_to_input(db: Session, plan: models.Plan) -> list[engine.InputStep]:
 
 
 def build_report(db: Session, plan: models.Plan) -> dict:
-    rules = (
-        db.query(models.Rule)
-        .filter(models.Rule.active.is_(True))
-        .all()
-    )
-    revision = rules_store.get_rule_revision()
+    """推演判定：只读取当前生效的规则版本；无生效版本时回退到实时规则图。"""
+    rules, revision, version_info = rule_versions.get_effective_source(db)
     steps = plan_to_input(db, plan)
     report = engine.simulate(steps, rules, revision)
     report["plan_name"] = plan.name
+    report["rule_version"] = version_info  # None 表示使用实时规则图
     return report
 
 

@@ -147,3 +147,45 @@ class RunOut(BaseModel):
     status: str
     created_at: datetime
     report: dict
+
+
+# ---------- 规则方案版本 ----------
+
+class RuleVersionCreate(BaseModel):
+    note: Optional[str] = Field(default=None, max_length=500)
+    from_version_id: Optional[int] = None  # 基于既有版本复制；缺省快照当前实时规则图
+
+
+class RuleVersionRuleIn(BaseModel):
+    id: str = Field(min_length=1, max_length=32, pattern=r"^[A-Za-z0-9_-]+$")
+    source: str = Field(min_length=1, max_length=64)
+    target: str = Field(min_length=1, max_length=64)
+    directional: bool = False
+    severity: Severity = "medium"
+    title: str = ""
+    reaction: str = ""
+    rationale: str = ""
+    references: list[str] = Field(default_factory=list)
+    active: bool = True
+    builtin: bool = False
+
+
+class RuleVersionUpdate(BaseModel):
+    """草稿版本整体编辑：变更说明与/或完整规则集。"""
+
+    note: Optional[str] = Field(default=None, max_length=500)
+    rules: Optional[list[RuleVersionRuleIn]] = None
+
+
+class RuleVersionRulePatch(BaseModel):
+    """草稿版本内单条规则编辑（严重级别依据等）。"""
+
+    source: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    target: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    directional: Optional[bool] = None
+    severity: Optional[Severity] = None
+    title: Optional[str] = None
+    reaction: Optional[str] = None
+    rationale: Optional[str] = None
+    references: Optional[list[str]] = None
+    active: Optional[bool] = None

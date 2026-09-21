@@ -410,6 +410,25 @@ textarea { resize: vertical; }
 .diff-tag { margin-right: 4px; }
 .diff-finding { cursor: pointer; }
 
+/* ---------- 规则方案版本 ---------- */
+.ver-effective {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 9px 14px;
+  margin-bottom: 10px;
+  background: var(--bg);
+}
+.ver-effective.on {
+  border: 1px solid #86efac;
+  background: var(--ok-bg);
+  border-style: solid;
+}
+.draft-rule { cursor: pointer; }
+
 .modal-wide { max-width: 900px; }
 .diff-modal-table { margin-top: 10px; }
 .diff-modal-table td { vertical-align: top; }

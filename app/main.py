@@ -8,7 +8,8 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import WEB_DIR
 from .database import SessionLocal, init_db
-from .routers import plans, reagents, rules, runs
+from .routers import plans, reagents, rule_versions, rules, runs
+from .rule_versions import ensure_default_scheme
 from .rules_store import sync_builtin_rules
 from .seed import seed_data
 
@@ -20,6 +21,7 @@ async def lifespan(app: FastAPI):
     try:
         sync_builtin_rules(db)
         seed_data(db)
+        ensure_default_scheme(db)
     finally:
         db.close()
     yield
@@ -35,6 +37,7 @@ app = FastAPI(
 app.include_router(reagents.router)
 app.include_router(plans.router)
 app.include_router(rules.router)
+app.include_router(rule_versions.router)
 app.include_router(runs.router)
 
 

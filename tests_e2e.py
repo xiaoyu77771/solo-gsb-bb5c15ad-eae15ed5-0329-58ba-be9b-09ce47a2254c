@@ -297,7 +297,147 @@ s, e = call("GET", "/api/runs/diff")
 check("缺少参数 422", s == 422, s)
 
 call("DELETE", f"/api/plans/{pid3}")
-call("DELETE", f"/api/runs/C010")
+call("DELETE", "/api/rules/C010")
+
+# ---------- 9. 规则方案版本：创建/草稿编辑/发布/停用/差异 ----------
+print("【场景9】规则方案版本模块")
+s, schemes = call("GET", "/api/rule-schemes")
+check("方案列表 200", s == 200 and len(schemes["schemes"]) >= 1, s)
+scheme = schemes["schemes"][0]
+sid = scheme["id"]
+check("默认规则方案已内置", scheme["builtin"] is True and scheme["name"], scheme)
+check("初始无生效版本", scheme["current_version"] is None, scheme.get("current_version"))
+
+# 基线：无生效版本时判定使用实时规则图
+s, r = call("POST", "/api/plans/1/simulate?persist=false")
+check("基线 danger（实时规则图）", s == 200 and r["status"] == "danger", (s, r.get("status")))
+check("基线 rule_version 为空", r.get("rule_version") is None, r.get("rule_version"))
+
+# 创建版本（快照当前规则图）→ 草稿
+s, v1 = call("POST", f"/api/rule-schemes/{sid}/versions", {"note": "初始快照"})
+check("创建版本 201", s == 201, (s, v1))
+check("新版本为草稿", v1["status"] == "draft", v1.get("status"))
+check("版本号从 1 开始", v1["version_no"] == 1, v1.get("version_no"))
+check("快照含全部规则", v1["rule_count"] >= 18, v1.get("rule_count"))
+check("记录创建时间", bool(v1.get("created_at")), v1.get("created_at"))
+v1_id = v1["id"]
+
+s, vd = call("GET", f"/api/rule-schemes/{sid}/versions/{v1_id}")
+r001 = next(x for x in vd["rules"] if x["id"] == "R001")
+check("版本保留严重级别依据", r001["severity"] == "high" and len(r001["rationale"]) > 10
+      and len(r001["references"]) >= 1, r001)
+
+# 草稿不影响判定
+s, r = call("POST", "/api/plans/1/simulate?persist=false")
+check("草稿不参与判定", r["status"] == "danger" and r.get("rule_version") is None)
+
+# 编辑草稿：R001 降级 + 修改依据；更新变更说明
+s, _ = call("PATCH", f"/api/rule-schemes/{sid}/versions/{v1_id}/rules/R001",
+            {"severity": "low", "rationale": "草稿修订：降级为提示"})
+check("草稿内编辑规则", s == 200, s)
+s, _ = call("PUT", f"/api/rule-schemes/{sid}/versions/{v1_id}", {"note": "初始快照（R001 降级）"})
+check("草稿更新变更说明", s == 200 and _["note"] == "初始快照（R001 降级）", (s, _))
+s, _ = call("PUT", f"/api/rule-schemes/{sid}/versions/{v1_id}",
+            {"rules": [{"id": "X1", "source": "a", "target": "a"}]})
+check("类别相同的规则被拒绝", s == 422, s)
+
+# 发布 v1 → 判定只读取生效版本
+s, v1p = call("POST", f"/api/rule-schemes/{sid}/versions/{v1_id}/publish")
+check("发布成功", s == 200 and v1p["status"] == "published", (s, v1p.get("status")))
+check("记录发布时间", bool(v1p.get("published_at")), v1p.get("published_at"))
+s, rules_resp = call("GET", "/api/rules")
+check("规则接口暴露生效版本", rules_resp.get("effective_version", {}).get("version_no") == 1,
+      rules_resp.get("effective_version"))
+s, r = call("POST", "/api/plans/1/simulate?persist=false")
+check("发布后判定读快照（R001 low→不再中止）", r["status"] == "warning", r["status"])
+check("报告标记版本来源", r["rule_version"]["version_no"] == 1
+      and "v1" in r["rule_revision"], r.get("rule_revision"))
+check("快照命中为 low", r["findings"][0]["severity"] == "low", r["findings"][:1])
+
+# 实时规则图改动不影响生效版本
+call("PATCH", "/api/rules/R001", {"severity": "high"})
+s, r = call("POST", "/api/plans/1/simulate?persist=false")
+check("实时改动被隔离（仍读快照）", r["status"] == "warning", r["status"])
+
+# 基于 v1 创建 v2，恢复 R001 为严重并修订机理，发布 → v1 自动停用
+s, v2 = call("POST", f"/api/rule-schemes/{sid}/versions",
+             {"note": "恢复 R001 严重", "from_version_id": v1_id})
+check("基于既有版本创建", s == 201 and v2["version_no"] == 2 and v2["status"] == "draft", (s, v2))
+v2_id = v2["id"]
+call("PATCH", f"/api/rule-schemes/{sid}/versions/{v2_id}/rules/R001",
+     {"severity": "high", "rationale": "2026 修订：剧毒 HCN，恢复严重级别"})
+s, _ = call("POST", f"/api/rule-schemes/{sid}/versions/{v2_id}/publish")
+check("v2 发布", s == 200 and _["status"] == "published", (s, _.get("status")))
+s, sch = call("GET", f"/api/rule-schemes/{sid}")
+v1_state = next(x for x in sch["versions"] if x["id"] == v1_id)
+check("v1 自动停用并记录时间", v1_state["status"] == "disabled" and v1_state["disabled_at"], v1_state)
+check("当前生效为 v2", sch["current_version"]["version_no"] == 2, sch.get("current_version"))
+s, r = call("POST", "/api/plans/1/simulate?persist=false")
+check("v2 生效后恢复 danger", r["status"] == "danger" and "v2" in r["rule_revision"], r["status"])
+
+# 版本差异：v1 → v2 应识别 R001 级别与依据变化
+s, d = call("GET", f"/api/rule-schemes/{sid}/diff?base_id={v1_id}&target_id={v2_id}")
+check("版本差异 200", s == 200 and d["kind"] == "labmix-rule-version-diff", (s, d.get("kind")))
+check("差异属于本方案", d["scheme_id"] == sid, d.get("scheme_id"))
+e = next((x for x in d["rules"] if x["rule_id"] == "R001"), None)
+check("R001 级别变化 low→high", e and e["change"] == "severity"
+      and e["base_severity"] == "low" and e["target_severity"] == "high", e)
+check("变化字段含级别与机理", e and "severity" in e["changed_fields"]
+      and "rationale" in e["changed_fields"], e and e["changed_fields"])
+check("两侧依据都可追溯", e and e["base"]["rationale"].startswith("草稿修订")
+      and "2026 修订" in e["target"]["rationale"], e)
+check("差异汇总计数", d["summary"]["rule_changes"]["severity"] == 1
+      and d["summary"]["rule_changes"]["unchanged"] >= 17, d["summary"]["rule_changes"])
+check("差异含两侧版本时间", bool(d["base"]["created_at"]) and bool(d["target"]["published_at"]))
+
+# 停用 v2 → 不再参与判定，回退实时规则图
+s, _ = call("POST", f"/api/rule-schemes/{sid}/versions/{v2_id}/disable")
+check("停用 v2", s == 200 and _["status"] == "disabled" and _["disabled_at"], (s, _))
+s, r = call("POST", "/api/plans/1/simulate?persist=false")
+check("停用后回退实时规则图", r["status"] == "danger" and r.get("rule_version") is None
+      and r["rule_revision"] == schemes["live_revision"], (r["status"], r.get("rule_revision")))
+s, sch = call("GET", f"/api/rule-schemes/{sid}")
+check("停用后无生效版本", sch["current_version"] is None, sch.get("current_version"))
+
+# 未发布的草稿不参与判定；草稿可删除
+s, v3 = call("POST", f"/api/rule-schemes/{sid}/versions", {"note": "临时草稿"})
+v3_id = v3["id"]
+call("PATCH", f"/api/rule-schemes/{sid}/versions/{v3_id}/rules/R001", {"severity": "low"})
+s, r = call("POST", "/api/plans/1/simulate?persist=false")
+check("未发布草稿不影响判定", r["status"] == "danger", r["status"])
+s, _ = call("DELETE", f"/api/rule-schemes/{sid}/versions/{v3_id}")
+check("草稿可删除", s == 204, s)
+
+# 重新发布 v1（回滚）→ 判定再次切换；随后清理
+s, _ = call("POST", f"/api/rule-schemes/{sid}/versions/{v1_id}/publish")
+check("已停用版本可重新发布", s == 200 and _["status"] == "published", (s, _))
+s, r = call("POST", "/api/plans/1/simulate?persist=false")
+check("回滚后判定读 v1", r["status"] == "warning" and "v1" in r["rule_revision"], r["status"])
+
+# 错误路径
+s, _ = call("POST", f"/api/rule-schemes/{sid}/versions/{v1_id}/publish")
+check("重复发布 409", s == 409, s)
+s, _ = call("PUT", f"/api/rule-schemes/{sid}/versions/{v1_id}", {"note": "x"})
+check("已发布版本不可编辑 409", s == 409, s)
+s, _ = call("PATCH", f"/api/rule-schemes/{sid}/versions/{v1_id}/rules/R001", {"severity": "low"})
+check("已发布版本规则不可编辑 409", s == 409, s)
+s, _ = call("DELETE", f"/api/rule-schemes/{sid}/versions/{v1_id}")
+check("已发布版本不可删除 409", s == 409, s)
+s, _ = call("POST", f"/api/rule-schemes/{sid}/versions/{v2_id}/disable")
+check("非发布版本停用 409", s == 409, s)
+s, _ = call("GET", f"/api/rule-schemes/{sid}/diff?base_id={v1_id}&target_id={v1_id}")
+check("相同版本比较 400", s == 400, s)
+s, _ = call("GET", f"/api/rule-schemes/{sid}/diff?base_id={v1_id}&target_id=999999")
+check("对照版本缺失 404", s == 404, s)
+s, _ = call("GET", f"/api/rule-schemes/{sid}/diff")
+check("缺少参数 422", s == 422, s)
+s, _ = call("GET", f"/api/rule-schemes/999999/versions/{v1_id}")
+check("方案缺失 404", s == 404, s)
+
+# 清理：停用生效版本，恢复实时规则图判定
+call("POST", f"/api/rule-schemes/{sid}/versions/{v1_id}/disable")
+s, r = call("POST", "/api/plans/1/simulate?persist=false")
+check("清理后恢复实时判定", r["status"] == "danger" and r.get("rule_version") is None)
 
 print(f"\n结果：{PASS} 通过，{FAIL} 失败")
 sys.exit(1 if FAIL else 0)

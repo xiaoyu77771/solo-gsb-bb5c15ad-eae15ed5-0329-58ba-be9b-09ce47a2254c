@@ -50,6 +50,14 @@ def _direction_for(rule, incoming_cat: str, existing_cat: str) -> str:
     return "existing->incoming"
 
 
+def _rule_references(rule) -> list:
+    """规则参考文献：兼容 JSON 字符串（Rule 表）与列表（版本快照）两种形态。"""
+    refs = getattr(rule, "references", [])
+    if isinstance(refs, str):
+        return json.loads(refs or "[]")
+    return list(refs or [])
+
+
 def simulate(steps: list[InputStep], db_rules, revision: str) -> dict:
     """执行逐步推演。db_rules: 已激活的规则 ORM 列表。"""
     findings: list[dict] = []
@@ -107,7 +115,7 @@ def simulate(steps: list[InputStep], db_rules, revision: str) -> dict:
                                 "title": rule.title,
                                 "reaction": rule.reaction,
                                 "rationale": rule.rationale,
-                                "references": json.loads(rule.references or "[]"),
+                                "references": _rule_references(rule),
                                 "incoming_step": step.order_index,
                                 "incoming_reagent": incoming.name,
                                 "incoming_category": ic,

@@ -4,7 +4,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from .. import models, rules_store
+from .. import models, rule_versions, rules_store
 from ..database import get_db
 from ..schemas import RuleCreate, RuleOut, RuleUpdate
 
@@ -44,8 +44,22 @@ def list_rules(active_only: bool = False, db: Session = Depends(get_db)):
                 categories[cat] = {"label": cat}
                 seen.add(cat)
 
+    # 当前生效的规则版本（若默认方案已发布版本，判定只读取该版本快照）
+    effective = None
+    scheme = (
+        db.query(models.RuleScheme)
+        .filter(models.RuleScheme.builtin.is_(True))
+        .first()
+    )
+    if scheme is not None:
+        published = rule_versions.get_published_version(db, scheme.id)
+        if published is not None:
+            effective = rule_versions.version_info_dict(scheme, published)
+            effective["revision_label"] = rule_versions.revision_label(published)
+
     return {
         "revision": rules_store.get_rule_revision(),
+        "effective_version": effective,
         "categories": categories,
         "rules": [_to_out(r) for r in rules],
     }
